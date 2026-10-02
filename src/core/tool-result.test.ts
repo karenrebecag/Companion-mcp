@@ -2,6 +2,10 @@
  * Tests for tool result helpers.
  */
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, rmdirSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { BridgeClient } from '../bridge/client.js';
 import { BridgeError } from '../bridge/errors.js';
 import { textResult, errorResult, runTool } from './tool-result.js';
 
@@ -41,6 +45,26 @@ describe('tool result helpers', () => {
     const block = result.content[0];
     expect(block.type === 'text' && block.text).toContain('error[stale_id]');
     expect(block.type === 'text' && block.text).toContain('Element ID expired');
+  });
+
+  it('a closed Companion reaches the model as companion_unavailable, not tool_failed', async () => {
+    const emptyDir = mkdtempSync(join(tmpdir(), 'companion-closed-'));
+    process.env.COMPANION_BRIDGE_DIR = emptyDir;
+    let result;
+    try {
+      result = await runTool(async () => {
+        await new BridgeClient().call('look', {});
+        return textResult('unreachable');
+      });
+    } finally {
+      delete process.env.COMPANION_BRIDGE_DIR;
+      rmdirSync(emptyDir);
+    }
+    expect(result.isError).toBe(true);
+    const block = result.content[0];
+    expect(block.type === 'text' && block.text).toMatch(
+      /^error\[companion_unavailable\]: Companion is not running/,
+    );
   });
 
   it('runTool returns success result when fn succeeds', async () => {

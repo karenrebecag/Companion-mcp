@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createServer, Server as NetServer, Socket } from 'net';
-import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'fs';
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { BridgeClient, BridgeError, type HelloResult, type ToolSpec } from './client.js';
@@ -241,7 +241,30 @@ describe('BridgeClient', () => {
     });
 
     const client = new BridgeClient();
-    await expect(client.connect()).rejects.toThrow(BridgeError);
+    // A refusal after connecting is Companion answering, so it must not read as "not running".
+    await expect(client.connect()).rejects.toMatchObject({
+      name: 'BridgeError',
+      code: 'bad_token',
+    });
+  });
+
+  it('busy — another agent holds the bridge, and the code survives', async () => {
+    writeToken('tok');
+    await startFakeServer((msg, socket) => {
+      if ((msg as Record<string, string>).method === 'hello') {
+        socket.write(
+          JSON.stringify({
+            id: (msg as Record<string, number>).id,
+            error: { code: 'busy', message: 'Another agent is connected' },
+          }) + '\n',
+        );
+      }
+    });
+
+    await expect(new BridgeClient().connect()).rejects.toMatchObject({
+      name: 'BridgeError',
+      code: 'busy',
+    });
   });
 
   it('stderr logs never contain argument values', async () => {
@@ -450,5 +473,156 @@ describe('BridgeClient', () => {
     }
 
     await client.close();
+  });
+});
+
+// ATOM QA 2026-10-02: with Companion closed a call failed with the raw "connect ECONNREFUSED
+// .../bridge.sock", which names no next step. open_app cannot help: it is one of Companion's own
+// tools, so the error must say to open Companion itself.
+describe('BridgeClient when Companion is not running', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'companion-down-'));
+    process.env.COMPANION_BRIDGE_DIR = testDir;
+  });
+
+  afterEach(() => {
+    delete process.env.COMPANION_BRIDGE_DIR;
+    for (const name of ['bridge.sock', 'bridge.token']) {
+      try {
+        unlinkSync(join(testDir, name));
+      } catch {
+        // ignore
+      }
+    }
+    try {
+      rmdirSync(testDir);
+    } catch {
+      // ignore
+    }
+  });
+
+  const notRunning = {
+    name: 'BridgeError',
+    code: 'companion_unavailable',
+    message: expect.stringMatching(
+      /Companion is not running.*open -a Companion.*open_app cannot start it/s,
+    ),
+  };
+
+  it('names the next step when Companion never ran here (no token)', async () => {
+    await expect(new BridgeClient().call('look', {})).rejects.toMatchObject(notRunning);
+  });
+
+  it('names the next step when nothing listens on the socket', async () => {
+    writeFileSync(join(testDir, 'bridge.token'), 'tok');
+    await expect(new BridgeClient().call('look', {})).rejects.toMatchObject(notRunning);
+  });
+
+  it('names the next step when the socket path is a leftover file', async () => {
+    writeFileSync(join(testDir, 'bridge.token'), 'tok');
+    writeFileSync(join(testDir, 'bridge.sock'), '');
+    await expect(new BridgeClient().call('look', {})).rejects.toMatchObject(notRunning);
+  });
+
+  it('keeps the original error as the cause and logs only its code', async () => {
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      writeFileSync(join(testDir, 'bridge.token'), 'secret-token-value');
+      const err = await new BridgeClient().connect().catch((e: unknown) => e);
+      expect(err).toMatchObject(notRunning);
+      expect((err as Error).cause).toMatchObject({ code: 'ENOENT' });
+      expect(writes.join('')).toContain('ENOENT');
+      expect(writes.join('')).not.toContain(testDir);
+      expect(writes.join('')).not.toContain('secret-token-value');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // A permission problem is not "Companion is closed": opening Companion would not fix it.
+  const permissionDenied = {
+    name: 'BridgeError',
+    code: 'permission_required',
+    message: expect.stringMatching(/same macOS user/),
+  };
+
+  // Root ignores mode 000, so these two only mean something for an ordinary user.
+  const asRoot = process.getuid?.() === 0;
+
+  it.skipIf(asRoot)(
+    'reports a token it may not read as a permission problem, not as Companion closed',
+    async () => {
+      const tokenPath = join(testDir, 'bridge.token');
+      writeFileSync(tokenPath, 'tok');
+      chmodSync(tokenPath, 0o000);
+      try {
+        const err = await new BridgeClient().connect().catch((e: unknown) => e);
+        expect(err).toMatchObject(permissionDenied);
+        expect((err as Error).cause).toMatchObject({ code: 'EACCES' });
+      } finally {
+        chmodSync(tokenPath, 0o600);
+      }
+    },
+  );
+
+  it.skipIf(asRoot)(
+    'reports a socket it may not open as a permission problem, not as Companion closed',
+    async () => {
+      writeFileSync(join(testDir, 'bridge.token'), 'tok');
+      const sockPath = join(testDir, 'bridge.sock');
+      const server = createServer();
+      await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+      chmodSync(sockPath, 0o000);
+      try {
+        const err = await new BridgeClient().connect().catch((e: unknown) => e);
+        expect(err).toMatchObject(permissionDenied);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
+  it('leaves any other failure untranslated', async () => {
+    mkdirSync(join(testDir, 'bridge.token'));
+    try {
+      const err = await new BridgeClient().connect().catch((e: unknown) => e);
+      expect(err).not.toBeInstanceOf(BridgeError);
+      expect(err).toMatchObject({ code: 'EISDIR' });
+    } finally {
+      rmdirSync(join(testDir, 'bridge.token'));
+    }
+  });
+
+  it('reads the token again on the next call, so opening Companion later recovers', async () => {
+    const client = new BridgeClient();
+    await expect(client.connect()).rejects.toMatchObject(notRunning);
+
+    writeFileSync(join(testDir, 'bridge.token'), 'fresh-token');
+    const seen: string[] = [];
+    const server = createServer((socket) => {
+      socket.on('data', (chunk) => {
+        const msg = JSON.parse(chunk.toString('utf-8').trim()) as {
+          id: number;
+          params: { token: string };
+        };
+        seen.push(msg.params.token);
+        const hello = { session: 's', language: 'en', accessibility: true, tools: [] };
+        socket.write(JSON.stringify({ id: msg.id, result: hello }) + '\n');
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(join(testDir, 'bridge.sock'), resolve));
+    try {
+      await client.connect();
+      expect(seen).toEqual(['fresh-token']);
+    } finally {
+      await client.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
