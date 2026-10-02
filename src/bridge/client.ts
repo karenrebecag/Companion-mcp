@@ -47,6 +47,8 @@ const MAX_LINE_SIZE = 65_536;
 const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const DEFAULT_WRITE_TIMEOUT_MS = 130_000;
 const NEWLINE = 0x0a;
+// Long enough for a local socket to flush one line, short enough not to stall the shim's exit.
+const BYE_FLUSH_MS = 500;
 
 // The socket and token exist only while Companion runs with its bridge on, so these mean "closed".
 const NOT_RUNNING_CODES = new Set(['ENOENT', 'ECONNREFUSED', 'ENOTSOCK']);
@@ -145,6 +147,8 @@ export class BridgeClient {
   private connecting: Promise<void> | null = null;
   // Companion sends some refusals without an id right before hanging up; they explain the close.
   private hangUpReason: BridgeError | null = null;
+  // Bumped by close(), so a connect still dialing when close() runs does not leave a live socket.
+  private generation = 0;
   private nextId = 1;
   private pending = new Map<number, PendingRequest>();
   private options: BridgeClientOptions;
@@ -180,9 +184,22 @@ export class BridgeClient {
   }
 
   async close(): Promise<void> {
-    if (this.socket) {
-      this.teardown(this.socket, new BridgeError('companion_unavailable', 'Socket closed'));
-    }
+    this.generation += 1;
+    const socket = this.socket;
+    if (!socket) return;
+    if (this.ready) await this.sayBye(socket);
+    this.teardown(socket, new BridgeError('companion_unavailable', 'Socket closed'));
+  }
+
+  // Companion frees its only slot on bye; without it the slot waits out the idle close.
+  private sayBye(socket: Socket): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const fallback = setTimeout(resolve, BYE_FLUSH_MS);
+      socket.write(JSON.stringify({ id: this.nextId++, method: 'bye' }) + '\n', () => {
+        clearTimeout(fallback);
+        resolve();
+      });
+    });
   }
 
   private async open(): Promise<void> {
@@ -193,7 +210,13 @@ export class BridgeClient {
       throw unreachable(err);
     }
 
+    const generation = this.generation;
     const socket = await this.dial();
+    if (generation !== this.generation) {
+      const closed = new BridgeError('companion_unavailable', 'Socket closed');
+      this.teardown(socket, closed);
+      throw closed;
+    }
     try {
       const hello = (await this.request(
         { method: 'hello', params: { token, client: 'claude-code', protocol: 1 } },

@@ -2,7 +2,7 @@
  * Connection lifecycle against a fake Companion: one connection at a time, framing per line,
  * and the server's reason surviving when it hangs up.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createServer, Server as NetServer, Socket } from 'net';
 import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
@@ -263,5 +263,79 @@ describe('BridgeClient lifecycle', () => {
     const err = (await client.call('look', {}).catch((e: unknown) => e)) as Error;
     expect(err).toMatchObject({ code: 'invalid_args' });
     expect(err.message.length).toBeLessThanOrEqual(300);
+  });
+
+  // H8: bye lets Companion free its only slot at once instead of waiting out the idle close.
+  it('says bye to Companion before hanging up', async () => {
+    const seen: string[] = [];
+    await start((msg, socket) => {
+      seen.push(msg.method);
+      if (msg.method === 'hello') reply(socket, msg.id, HELLO_RESULT);
+    });
+    const client = new BridgeClient();
+    await client.connect();
+    await client.close();
+    await vi.waitFor(() => expect(seen).toContain('bye'));
+    expect(client.isConnected).toBe(false);
+  });
+
+  // connect() is still dialing when it returns, so a close() right after lands in that window.
+  it('does not keep a connection that finishes after close was called', async () => {
+    let hungUp!: Promise<void>;
+    await start((msg, socket) => {
+      if (msg.method === 'hello') reply(socket, msg.id, HELLO_RESULT);
+    });
+    server.on('connection', (socket: Socket) => {
+      hungUp = new Promise((resolve) => socket.on('close', () => resolve()));
+    });
+    const client = new BridgeClient();
+    const connecting = client.connect();
+    await client.close();
+    await expect(connecting).rejects.toMatchObject({ code: 'companion_unavailable' });
+    expect(client.isConnected).toBe(false);
+    await vi.waitFor(() => expect(hungUp).toBeDefined());
+    await hungUp;
+  });
+
+  it('hangs up without bye when closed while hello is still pending', async () => {
+    const seen: string[] = [];
+    let hungUp!: Promise<void>;
+    await start((msg, socket) => {
+      seen.push(msg.method);
+      hungUp ??= new Promise((resolve) => socket.on('close', () => resolve()));
+    });
+    const client = new BridgeClient();
+    const connecting = client.connect();
+    await vi.waitFor(() => expect(seen).toEqual(['hello']));
+    await client.close();
+    await expect(connecting).rejects.toMatchObject({ code: 'companion_unavailable' });
+    await hungUp;
+    expect(seen).toEqual(['hello']);
+  });
+
+  it('closes quietly when it never connected, and once when closed twice', async () => {
+    await expect(new BridgeClient().close()).resolves.toBeUndefined();
+    const seen: string[] = [];
+    await start((msg, socket) => {
+      seen.push(msg.method);
+      if (msg.method === 'hello') reply(socket, msg.id, HELLO_RESULT);
+    });
+    const client = new BridgeClient();
+    await client.connect();
+    await client.close();
+    await client.close();
+    await vi.waitFor(() => expect(seen).toContain('bye'));
+    expect(seen.filter((m) => m === 'bye')).toHaveLength(1);
+  });
+
+  it('connects again after close', async () => {
+    await start(helloThen(() => undefined));
+    const client = new BridgeClient();
+    await client.connect();
+    await client.close();
+    await client.connect();
+    expect(client.isConnected).toBe(true);
+    expect(sockets).toHaveLength(2);
+    await client.close();
   });
 });

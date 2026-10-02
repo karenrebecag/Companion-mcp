@@ -13,10 +13,12 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { BridgeClient } from './bridge/client.js';
 import { createServer, attachBridge } from './server.js';
+import { installShutdown } from './shutdown.js';
 
 async function main(): Promise<void> {
   const client = new BridgeClient();
   const server = createServer(client);
+  installShutdown(client);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   await attachBridge(server, client);
