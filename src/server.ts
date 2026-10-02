@@ -3,11 +3,11 @@
  *
  * createServer creates the MCP server with companion_status as a fallback tool.
  * attachBridge should be called after server.connect(transport) to lazily connect
- * to Companion and register tools. Tools are never re-registered on reconnect.
+ * to Companion and register tools. The tool list follows each hello from Companion.
  */
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, type RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { BridgeClient, type ToolSpec, type CallResult } from './bridge/client.js';
+import { BridgeClient, BridgeError, type ToolSpec, type CallResult } from './bridge/client.js';
 import { textResult, errorResult, runTool } from './core/tool-result.js';
 
 const INSTRUCTIONS = [
@@ -86,6 +86,9 @@ function buildDescription(spec: ToolSpec, isWriteTool: boolean): string {
   return fullDesc;
 }
 
+// One syncer per server, so companion_status and attachBridge share what is registered.
+const syncers = new WeakMap<McpServer, () => void>();
+
 export function createServer(client: BridgeClient): McpServer {
   const server = new McpServer(
     {
@@ -93,14 +96,17 @@ export function createServer(client: BridgeClient): McpServer {
       version: '0.1.0',
       title: 'Companion',
     },
-    { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
+    { capabilities: { tools: { listChanged: true } }, instructions: INSTRUCTIONS },
   );
+  const syncTools = toolSyncer(server, client);
+  syncers.set(server, syncTools);
 
-  // Register companion_status as the fallback tool.
+  // It connects instead of only reporting: Companion opened after the shim started is otherwise
+  // never picked up, and its tools never appear.
   server.registerTool(
     'companion_status',
     {
-      description: 'Check whether Companion is reachable.',
+      description: 'Check whether Companion is reachable, and connect to it if it just opened.',
       inputSchema: z.object({}),
       annotations: {
         readOnlyHint: true,
@@ -109,14 +115,13 @@ export function createServer(client: BridgeClient): McpServer {
     },
     async () => {
       return runTool(async () => {
-        if (client.isConnected && client.session) {
-          return textResult(`Companion is connected. Session: ${client.session}`);
+        try {
+          await client.connect();
+        } catch (err) {
+          return textResult(`Companion is not reachable. ${unreachableReason(err)}`);
         }
-        return textResult(
-          'Companion is not reachable. To enable the bridge: open Companion › ' +
-            'Ajustes › Agentes › "Prestar las manos a otros agentes". ' +
-            'The first action opens an approval sheet in Companion.',
-        );
+        syncTools();
+        return textResult(`Companion is connected. Session: ${client.session}`);
       });
     },
   );
@@ -124,56 +129,103 @@ export function createServer(client: BridgeClient): McpServer {
   return server;
 }
 
+// BridgeError text is written for the agent; any other error is raw Node text that carries the bridge path.
+function unreachableReason(err: unknown): string {
+  if (err instanceof BridgeError) return err.message;
+  const code =
+    err instanceof Error && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
+  return `Unexpected error${code ? ` (${code})` : ''}: check that Companion is open and its bridge is on.`;
+}
+
 /**
  * Attach the bridge to the server: connect to Companion and register its tools.
- * Call this after server.connect(transport) to ensure tools are registered
- * with a working transport. Tools are registered only once, never re-registered on reconnect.
+ * Call this after server.connect(transport) so the tool list change reaches the client.
  */
 export async function attachBridge(server: McpServer, client: BridgeClient): Promise<void> {
-  let registered = false;
+  try {
+    await client.connect();
+  } catch (err) {
+    process.stderr.write(
+      `[server] connect failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return;
+  }
+  syncers.get(server)?.();
+}
 
-  async function tryConnect(): Promise<void> {
-    if (registered) return; // Tools already registered, never again.
+/**
+ * Brings the registered tools in line with the last hello: a reconnect can bring another
+ * language or tool set. Registering, updating and removing each notify the client.
+ */
+function toolSyncer(server: McpServer, client: BridgeClient): () => void {
+  const registered = new Map<string, { signature: string; tool: RegisteredTool }>();
+
+  // It runs after calls that already acted, so it logs instead of throwing: a failure here would
+  // reach the agent as a failed action and invite a retry.
+  const sync = (): void => {
     try {
-      await client.connect();
-
-      // Register all tools from companion.
-      for (const spec of client.tools) {
-        const schema = buildSchemaForTool(spec);
-        const isReadOnly = READ_ONLY_TOOLS.has(spec.name);
-        const description = buildDescription(spec, !isReadOnly);
-
-        server.registerTool(
-          spec.name,
-          {
-            description,
-            inputSchema: schema,
-            annotations: {
-              readOnlyHint: isReadOnly,
-              openWorldHint: true,
-            },
-          },
-          async (args: unknown) => {
-            return runTool(async () => {
-              const result = await client.call(spec.name, args as Record<string, unknown>);
-              return handleCallResult(result);
-            });
-          },
-        );
-      }
-
-      registered = true;
-
-      // Notify the client of tool list change. Errors here don't undo registration.
-      server.sendToolListChanged?.();
+      apply();
     } catch (err) {
       process.stderr.write(
-        `[server] connect failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        `[server] tool sync failed: ${err instanceof Error ? err.message : String(err)}\n`,
       );
     }
-  }
+  };
 
-  await tryConnect();
+  const apply = (): void => {
+    if (!Array.isArray(client.tools)) throw new Error('hello carried no tool list');
+    const wanted = new Map(client.tools.map((spec) => [spec.name, spec]));
+    for (const [name, entry] of registered) {
+      const spec = wanted.get(name);
+      if (!spec || JSON.stringify(spec) !== entry.signature) {
+        entry.tool.remove();
+        registered.delete(name);
+      }
+    }
+    for (const spec of wanted.values()) {
+      if (registered.has(spec.name)) continue;
+      // A name that clashes with companion_status throws; it must not cost the rest.
+      try {
+        registered.set(spec.name, {
+          signature: JSON.stringify(spec),
+          tool: registerBridgeTool(server, client, spec, sync),
+        });
+      } catch (err) {
+        process.stderr.write(
+          `[server] skipped tool ${spec.name}: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+  };
+  return sync;
+}
+
+function registerBridgeTool(
+  server: McpServer,
+  client: BridgeClient,
+  spec: ToolSpec,
+  sync: () => void,
+): RegisteredTool {
+  const isReadOnly = READ_ONLY_TOOLS.has(spec.name);
+  return server.registerTool(
+    spec.name,
+    {
+      description: buildDescription(spec, !isReadOnly),
+      inputSchema: buildSchemaForTool(spec),
+      annotations: {
+        readOnlyHint: isReadOnly,
+        openWorldHint: true,
+      },
+    },
+    async (args: unknown) => {
+      return runTool(async () => {
+        const result = await client.call(spec.name, args as Record<string, unknown>);
+        // The call may have reconnected, and that hello may carry a different tool set.
+        sync();
+        return handleCallResult(result);
+      });
+    },
+  );
 }
 
 function handleCallResult(result: CallResult): ReturnType<typeof textResult> {
