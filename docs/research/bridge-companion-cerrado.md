@@ -1,6 +1,6 @@
 # Reference Brief: error accionable cuando Companion no esta abierto
 
-Slug: bridge-companion-cerrado | Nivel: quick | Fecha: 2026-10-02 | Estado: ESCALADO
+Slug: bridge-companion-cerrado | Nivel: quick | Fecha: 2026-10-02 | Estado: APROBADO
 Versiones: @types/node=22, @modelcontextprotocol/sdk=1
 Verificador: research-verifier 2026-10-02 ESCALATE
 
@@ -153,3 +153,5 @@ Propuesta del orquestador 2026-10-02, leida de la referencia local de Incredible
 - 1b. EACCES deja de quedar crudo y recibe su propio codigo con un mensaje que dice como arreglarlo; la referencia local separa el permiso faltante en un codigo aparte, con la ruta de Ajustes donde se concede. El nombre y el texto los firma Karen.
 - 1c. La referencia local no lo cubre. Default del orquestador: corregir en este PR el README, que dice que companion_status reintenta (README:121 contra server.ts:112).
 - 1d. Sin auto-arranque: el host nativo de la referencia local solo prepara el secreto y nunca abre la app.
+
+[KAREN:chat 2026-10-02] Se decide exactamente como lo resuelve la referencia local de Incredible: 1a opcion A (codigo propio y mensaje que nombra la accion siguiente); 1b EACCES con codigo propio y mensaje que dice como arreglarlo; 1c el README se corrige en este PR; 1d sin autoarranque de Companion.
