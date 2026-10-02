@@ -155,3 +155,5 @@ Propuesta del orquestador 2026-10-02, leida de la referencia local de Incredible
 - 1d. Sin auto-arranque: el host nativo de la referencia local solo prepara el secreto y nunca abre la app.
 
 [KAREN:chat 2026-10-02] Se decide exactamente como lo resuelve la referencia local de Incredible: 1a opcion A (codigo propio y mensaje que nombra la accion siguiente); 1b EACCES con codigo propio y mensaje que dice como arreglarlo; 1c el README se corrige en este PR; 1d sin autoarranque de Companion.
+
+<!-- reutilizado en fix/bridge-not-running-error 2026-10-02: implementacion de la opcion A con las decisiones 1a-1d firmadas -->

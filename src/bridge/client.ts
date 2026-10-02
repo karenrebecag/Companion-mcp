@@ -47,6 +47,37 @@ const MAX_LINE_SIZE = 65_536;
 const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const DEFAULT_WRITE_TIMEOUT_MS = 130_000;
 
+// The socket and token exist only while Companion runs with its bridge on, so these mean "closed".
+const NOT_RUNNING_CODES = new Set(['ENOENT', 'ECONNREFUSED', 'ENOTSOCK']);
+const NOT_RUNNING_MESSAGE =
+  'Companion is not running, or its bridge is off. Open Companion (for example: open -a Companion), ' +
+  'check Ajustes › Agentes › "Prestar las manos a otros agentes", then retry. ' +
+  'open_app cannot start it: it runs inside Companion.';
+// Opening Companion would not fix this one: the files exist but belong to another user.
+const PERMISSION_MESSAGE =
+  "Companion's bridge files cannot be opened by this process (permission denied). " +
+  'Run Claude Code as the same macOS user that runs Companion, then retry.';
+
+/**
+ * The one place a failure to reach Companion becomes an actionable error, so a future
+ * auto-launch hooks in here. Matches on err.code only; anything unlisted passes through raw.
+ */
+function unreachable(err: unknown): unknown {
+  const code =
+    err instanceof Error && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
+  let translated: BridgeError;
+  if (code !== undefined && NOT_RUNNING_CODES.has(code)) {
+    translated = new BridgeError('companion_unavailable', NOT_RUNNING_MESSAGE, { cause: err });
+  } else if (code === 'EACCES') {
+    translated = new BridgeError('permission_required', PERMISSION_MESSAGE, { cause: err });
+  } else {
+    return err;
+  }
+  // The raw message carries the bridge path; the code alone is enough to diagnose.
+  process.stderr.write(`[bridge] companion unreachable: ${code}\n`);
+  return translated;
+}
+
 interface TimeoutConfig {
   ms: number;
   code: 'timeout' | 'approval_timeout';
@@ -100,17 +131,22 @@ export class BridgeClient {
     if (this.connected) return;
 
     const socketPath = getSocketPath();
-    const tokenContent = readFileSync(getTokenPath(), 'utf-8');
-    const token = tokenContent.trim();
+    let token: string;
+    try {
+      token = readFileSync(getTokenPath(), 'utf-8').trim();
+    } catch (err) {
+      throw unreachable(err);
+    }
 
     return new Promise<void>((resolve, reject) => {
       const socket = createConnection(socketPath);
 
+      // Registered with once() and removed on 'connect', so it only sees failures to reach the socket.
       const onError = (err: Error) => {
         socket.destroy();
         this.socket = null;
         this.connected = false;
-        reject(err);
+        reject(unreachable(err));
       };
 
       const onConnect = () => {

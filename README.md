@@ -118,4 +118,6 @@ Runs type check, linting, format check, and tests.
 - `src/core/tool-result.ts`: Result formatting helpers
 - `src/index.ts`: stdio entry point
 
-The server attempts to connect to Companion on startup but doesn't block if it's unavailable. If Companion is not running or the setting is off, only `companion_status` is registered; it guides the user to enable the bridge and retries on each call.
+The server attempts to connect to Companion on startup but doesn't block if it's unavailable. If Companion is not running or the setting is off, only `companion_status` is registered; it reports that Companion is unreachable and how to enable the bridge, but it does not retry the connection. Companion's tools are registered only by that startup attempt, so after opening Companion, reconnect the server (in Claude Code: `/mcp`).
+
+If Companion closes after its tools were registered, the next call tries to reconnect and fails with `error[companion_unavailable]`, which says to open Companion itself (`open_app` cannot start it: it runs inside Companion). A bridge file this process may not open fails with `error[permission_required]` instead.
