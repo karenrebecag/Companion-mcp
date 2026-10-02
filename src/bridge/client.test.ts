@@ -609,8 +609,11 @@ describe('BridgeClient when Companion is not running', () => {
       socket.on('data', (chunk) => {
         const msg = JSON.parse(chunk.toString('utf-8').trim()) as {
           id: number;
-          params: { token: string };
+          method: string;
+          params?: { token: string };
         };
+        // close() now says bye, which carries no params.
+        if (msg.method !== 'hello' || !msg.params) return;
         seen.push(msg.params.token);
         const hello = { session: 's', language: 'en', accessibility: true, tools: [] };
         socket.write(JSON.stringify({ id: msg.id, result: hello }) + '\n');
