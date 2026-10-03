@@ -14,6 +14,7 @@ export const WRITE_TOOLS: ReadonlySet<string> = new Set([
   'open_file',
   'browser_click',
   'browser_type',
+  'browser_select',
   'browser_navigate',
   'browser_open',
   'browser_take',
