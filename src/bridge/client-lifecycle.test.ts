@@ -518,6 +518,7 @@ describe('BridgeClient lifecycle', () => {
     'browser_type',
     'browser_select',
     'browser_navigate',
+    'browser_press',
     'browser_open',
     'browser_take',
     'browser_release',

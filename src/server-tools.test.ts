@@ -372,6 +372,13 @@ describe('tool list follows Companion', () => {
     expect(READ_TOOLS.has('browser_select')).toBe(false);
   });
 
+  // browser_press can submit a form with Enter, behind the same per-call sheet as a click; listing
+  // it keeps the annotation and the timeout from depending on the unknown-tool fallback.
+  it('lists browser_press as an action, as Companion buckets it', () => {
+    expect(WRITE_TOOLS.has('browser_press')).toBe(true);
+    expect(READ_TOOLS.has('browser_press')).toBe(false);
+  });
+
   it('never lists a tool as both a read and an action', () => {
     expect([...READ_TOOLS].filter((n) => WRITE_TOOLS.has(n))).toEqual([]);
   });
