@@ -21,6 +21,10 @@ export interface ToolSpec {
     name: string;
     type: string;
     description: string;
+    // Optional constraints a newer Companion declares; the shim enforces them before sending.
+    enum?: unknown;
+    minLength?: unknown;
+    maxBytes?: unknown;
   }>;
   required: string[];
 }
