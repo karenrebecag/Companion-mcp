@@ -365,6 +365,13 @@ describe('tool list follows Companion', () => {
     await bridge.close();
   });
 
+  // browser_select picks an option behind the same per-call sheet as browser_type; listing it
+  // keeps the annotation and the timeout from depending on the unknown-tool fallback.
+  it('lists browser_select as an action, as Companion buckets it', () => {
+    expect(WRITE_TOOLS.has('browser_select')).toBe(true);
+    expect(READ_TOOLS.has('browser_select')).toBe(false);
+  });
+
   it('never lists a tool as both a read and an action', () => {
     expect([...READ_TOOLS].filter((n) => WRITE_TOOLS.has(n))).toEqual([]);
   });

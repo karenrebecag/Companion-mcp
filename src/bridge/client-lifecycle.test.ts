@@ -516,6 +516,7 @@ describe('BridgeClient lifecycle', () => {
   it.each([
     'browser_click',
     'browser_type',
+    'browser_select',
     'browser_navigate',
     'browser_open',
     'browser_take',
