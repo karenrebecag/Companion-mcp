@@ -74,3 +74,30 @@ describe('tool result helpers', () => {
     expect(block.type === 'text' && block.text).toBe('Success!');
   });
 });
+
+// Thrown errors skip handleCallResult; the cleaning lives where every error passes.
+describe('errorResult cleaning', () => {
+  const text = (r: { content: unknown[] }) => (r.content[0] as { text: string }).text;
+
+  it('strips, flattens and caps the message at 300 characters, and refuses a malformed code', () => {
+    const out = text(errorResult('Not A Code', `a\u{E0049}b\nc ${'x'.repeat(1000)}`));
+    expect(out.startsWith('error[tool_failed]: ab c ')).toBe(true);
+    expect(out.length - 'error[tool_failed]: '.length).toBe(300);
+  });
+
+  it('never cuts an astral character in half at the cap', () => {
+    const out = text(errorResult('x', `${'a'.repeat(299)}\u{1F600}tail`));
+    expect(out).toBe(`error[x]: ${'a'.repeat(299)}\u{1F600}`);
+  });
+
+  it.each([
+    [new BridgeError('stale_id', 'a\u{E0049}b\nc'), 'error[stale_id]: ab c'],
+    [new Error('a\u{200B}b'), 'error[tool_failed]: ab'],
+    ['raw\u{202E} string', 'error[tool_failed]: raw string'],
+  ])('cleans what runTool catches: %s', async (thrown, expected) => {
+    const out = await runTool(async () => {
+      throw thrown;
+    });
+    expect(text(out)).toBe(expected);
+  });
+});

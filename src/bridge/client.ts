@@ -8,6 +8,7 @@
 import { createConnection, Socket } from 'net';
 import { readFileSync } from 'fs';
 import { getSocketPath, getTokenPath } from './paths.js';
+import { stripInvisible } from '../core/screen-text.js';
 import { BridgeError } from './errors.js';
 import { isWriteTool } from './tool-kinds.js';
 
@@ -118,8 +119,9 @@ function parseServerError(raw: unknown): ServerErrorBody | null {
 // The message reaches the model: one short line, so it cannot carry a paragraph of instructions.
 function serverError(error: ServerErrorBody): BridgeError {
   if (error.code === 'busy') return new BridgeError('busy', BUSY_MESSAGE);
+  // Cleaned here too: companion_status shows this text without passing through errorResult.
   // eslint-disable-next-line no-control-regex
-  const flat = error.message.replace(/[\x00-\x1F\x7F\u2028\u2029]+/g, ' ').trim();
+  const flat = stripInvisible(error.message.replace(/[\x00-\x1F\x7F\u2028\u2029]+/g, ' ')).trim();
   return new BridgeError(error.code, flat.slice(0, MAX_SERVER_MESSAGE));
 }
 

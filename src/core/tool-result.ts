@@ -6,14 +6,26 @@
  */
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeError } from '../bridge/errors.js';
+import { stripInvisible } from './screen-text.js';
+
+// Same ceiling as a server error: enough for a sentence, too short to smuggle a page in.
+const MAX_ERROR_MESSAGE = 300;
+const ERROR_CODE = /^[a-z_]+$/;
 
 export function textResult(text: string): CallToolResult {
   return { content: [{ type: 'text', text }] };
 }
 
+// Every error reaches the agent through here, thrown or returned, and its text may come from the
+// screen: one line, no invisible characters, bounded, and a code the page cannot invent a shape for.
 export function errorResult(code: string, message: string): CallToolResult {
+  const safeCode = ERROR_CODE.test(code) ? code : 'tool_failed';
+  // Cut by code point: a UTF-16 slice can leave half an emoji at the end.
+  const flat = Array.from(stripInvisible(message).replace(/\s+/g, ' '))
+    .slice(0, MAX_ERROR_MESSAGE)
+    .join('');
   return {
-    content: [{ type: 'text', text: `error[${code}]: ${message}` }],
+    content: [{ type: 'text', text: `error[${safeCode}]: ${flat}` }],
     isError: true,
   };
 }

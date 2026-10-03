@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { BridgeClient, BridgeError, type ToolSpec, type CallResult } from './bridge/client.js';
 import { textResult, errorResult, runTool } from './core/tool-result.js';
 import { isWriteTool } from './bridge/tool-kinds.js';
+import { stripInvisible, fenceScreenContent } from './core/screen-text.js';
 
 const INSTRUCTIONS = [
   'To use Companion with Claude Code, call open_app first (Companion pins the app in front),',
@@ -221,23 +222,17 @@ function registerBridgeTool(
 }
 
 function handleCallResult(result: CallResult): ReturnType<typeof textResult> {
+  const output = stripInvisible(typeof result.output === 'string' ? result.output : '');
   if (!result.ok) {
-    // Error result from Companion: try to parse embedded code from output.
     // Companion encodes errors as "code: message" (e.g., "target_changed: app not in front").
-    const codeMatch = result.output.match(/^([a-z_]+):\s?(.*)$/);
+    const codeMatch = output.match(/^([a-z_]+):\s?(.*)$/s);
     if (codeMatch) {
-      const code = codeMatch[1];
-      const message = codeMatch[2];
-      return errorResult(code, message);
+      return errorResult(codeMatch[1], codeMatch[2]);
     }
-    // Fallback: use tool_failed as the code.
-    return errorResult('tool_failed', result.output);
+    return errorResult('tool_failed', output);
   }
 
-  // Success: build text from output and target.
-  let text = result.output;
-  if (result.target) {
-    text += '\n' + result.target;
-  }
-  return textResult(text);
+  const target = typeof result.target === 'string' ? stripInvisible(result.target) : '';
+  const text = target ? `${output}\n${target}` : output;
+  return textResult(fenceScreenContent(text));
 }
