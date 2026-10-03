@@ -13,6 +13,8 @@ export const WRITE_TOOLS: ReadonlySet<string> = new Set([
   'open_url',
   'open_file',
   'browser_click',
+  'browser_double_click',
+  'browser_right_click',
   'browser_type',
   'browser_select',
   'browser_navigate',

@@ -379,6 +379,15 @@ describe('tool list follows Companion', () => {
     expect(READ_TOOLS.has('browser_press')).toBe(false);
   });
 
+  // The click's two variants press the same element behind the same per-call sheet as browser_click.
+  it.each(['browser_double_click', 'browser_right_click'])(
+    'lists %s as an action, as Companion buckets it',
+    (name) => {
+      expect(WRITE_TOOLS.has(name)).toBe(true);
+      expect(READ_TOOLS.has(name)).toBe(false);
+    },
+  );
+
   it('never lists a tool as both a read and an action', () => {
     expect([...READ_TOOLS].filter((n) => WRITE_TOOLS.has(n))).toEqual([]);
   });

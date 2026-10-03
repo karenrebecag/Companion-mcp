@@ -515,6 +515,8 @@ describe('BridgeClient lifecycle', () => {
   // later is held to the same, until the list says it only reads.
   it.each([
     'browser_click',
+    'browser_double_click',
+    'browser_right_click',
     'browser_type',
     'browser_select',
     'browser_navigate',
