@@ -122,10 +122,8 @@ describe('BridgeClient lifecycle', () => {
     );
     const client = new BridgeClient();
     await client.connect();
-    const pendingSee = client.call('see', {});
     await expect(client.call('look', {})).resolves.toMatchObject({ output: 'fine' });
-    await expect(pendingSee).rejects.toMatchObject({ code: 'frame_too_large' });
-    expect(client.isConnected).toBe(false);
+    await vi.waitFor(() => expect(client.isConnected).toBe(false));
   });
 
   it('rejects the calls still waiting when it is closed', async () => {
@@ -139,28 +137,28 @@ describe('BridgeClient lifecycle', () => {
   });
 
   // H5: the old guard measured the whole buffer, so a reply's tail plus the next reply crossed 64 KB.
+  // One call is on the wire at a time, so the frame ahead of the reply is one the shim no longer
+  // waits for, such as a reply to a call whose connection already moved on.
   it('keeps two replies that are each under 64 KB but sit in the buffer together', async () => {
-    const sizes = [60_000, 10_000];
-    const held: Msg[] = [];
     await start(
       helloThen((msg, socket) => {
-        held.push(msg);
-        if (held.length < 2) return;
-        const [first, second] = held.map(
-          (m, i) =>
-            JSON.stringify({
-              id: m.id,
-              result: { ok: true, output: 'a'.repeat(sizes[i]), target: '' },
-            }) + '\n',
-        );
-        socket.write(first.slice(0, -10));
-        setTimeout(() => socket.write(first.slice(-10) + second), 20);
+        const stray =
+          JSON.stringify({
+            id: 999,
+            result: { ok: true, output: 'a'.repeat(60_000), target: '' },
+          }) + '\n';
+        const own =
+          JSON.stringify({
+            id: msg.id,
+            result: { ok: true, output: 'b'.repeat(10_000), target: '' },
+          }) + '\n';
+        socket.write(stray.slice(0, -10));
+        setTimeout(() => socket.write(stray.slice(-10) + own), 20);
       }),
     );
-    const client = new BridgeClient();
+    const client = new BridgeClient({ sessionSheetMs: 0 });
     await client.connect();
-    const [a, b] = await Promise.all([client.call('look', {}), client.call('see', {})]);
-    expect(a.output).toHaveLength(60_000);
+    const b = await client.call('see', {});
     expect(b.output).toHaveLength(10_000);
     expect(client.isConnected).toBe(true);
     await client.close();
@@ -393,29 +391,19 @@ describe('BridgeClient lifecycle', () => {
     await client.close();
   });
 
-  // A call already running when another gets session_closed may have acted: resending it would
-  // run a click or a type_text twice.
-  it('never resends a call that was in flight when another got session_closed', async () => {
+  // A session_closed that is not the reply to this call says nothing about whether it ran:
+  // resending it could run a click or a type_text twice.
+  it('never resends a call that was in flight when Companion hung up with session_closed', async () => {
     const frames: Array<{ connection: number; name?: string }> = [];
     await start(
       helloThen((msg, socket, connection) => {
         frames.push({ connection, name: msg.params?.name });
-        if (connection === 1 && msg.params?.name === 'click') return;
-        if (connection === 1) {
-          socket.write(
-            JSON.stringify({ id: msg.id, error: { code: 'session_closed', message: 'x' } }) + '\n',
-          );
-        } else reply(socket, msg.id, { ok: true, output: 'again', target: '' });
+        socket.end(JSON.stringify({ error: { code: 'session_closed', message: 'x' } }) + '\n');
       }),
     );
     const client = new BridgeClient();
     await client.connect();
-    // Observed from the start: it rejects while the other call is still being retried.
-    const running = client.call('click', { id: 7 }).catch((e: unknown) => e);
-    await vi.waitFor(() => expect(frames).toHaveLength(1));
-    const rejected = client.call('look', {});
-    await expect(rejected).resolves.toMatchObject({ output: 'again' });
-    expect(await running).toMatchObject({ code: 'companion_unavailable' });
+    await expect(client.call('click', { id: 7 })).rejects.toMatchObject({ code: 'session_closed' });
     expect(frames.filter((f) => f.name === 'click')).toHaveLength(1);
     await client.close();
   });
@@ -603,9 +591,8 @@ describe('BridgeClient lifecycle', () => {
     }
   });
 
-  // Companion handles one line at a time, so a call sent while the session sheet is up waits
-  // behind it as long as the first one does.
-  it('gives every call sent while the session sheet is up the time of that sheet', async () => {
+  // The call that raises the session sheet waits it out; the next one is sent after it, with its own time.
+  it('gives the session sheet time to the call that raises it, and the next call its own time', async () => {
     let queue = Promise.resolve();
     await start(
       helloThen((msg, socket) => {
@@ -622,8 +609,12 @@ describe('BridgeClient lifecycle', () => {
     );
     const client = new BridgeClient({ readTimeoutMs: 30, sessionSheetMs: 250 });
     try {
-      const both = await Promise.all([client.call('look', {}), client.call('see', {})]);
-      expect(both.map((r) => r.ok)).toEqual([true, true]);
+      const [first, second] = await Promise.allSettled([
+        client.call('look', {}),
+        client.call('see', {}),
+      ]);
+      expect(first).toMatchObject({ status: 'fulfilled' });
+      expect(second).toMatchObject({ status: 'rejected', reason: { code: 'timeout' } });
     } finally {
       await client.close();
     }
@@ -652,9 +643,9 @@ describe('BridgeClient lifecycle', () => {
   it('spends the sheet time on the first call even when that call fails', async () => {
     await start(
       helloThen((msg, socket) => {
-        if (msg.params?.name === 'see') {
-          setTimeout(() => reply(socket, msg.id, { ok: true, output: 'x', target: '' }), 90);
-        }
+        // look answers after its own timeout, so see goes out on the same connection.
+        const delay = msg.params?.name === 'see' ? 90 : 200;
+        setTimeout(() => reply(socket, msg.id, { ok: true, output: 'x', target: '' }), delay);
       }),
     );
     // 30 + 100 ms would let the 90 ms reply through: only a spent allowance makes it time out.
@@ -662,6 +653,253 @@ describe('BridgeClient lifecycle', () => {
     try {
       await expect(client.call('look', {})).rejects.toMatchObject({ code: 'timeout' });
       await expect(client.call('see', {})).rejects.toMatchObject({ code: 'timeout' });
+    } finally {
+      await client.close();
+    }
+  });
+
+  // Companion serves one line at a time: a call sent behind a slow one waits there, so a timer that
+  // starts on send expires while Companion has not even looked at it, and the call runs anyway.
+  function serialCompanion(delays: Record<string, number>, seen: string[]): Handler {
+    let queue = Promise.resolve();
+    return helloThen((msg, socket) => {
+      const name = String(msg.params?.name);
+      queue = queue.then(
+        () =>
+          new Promise<void>((resolve) => {
+            seen.push(`start ${name}`);
+            setTimeout(() => {
+              seen.push(`end ${name}`);
+              reply(socket, msg.id, { ok: true, output: name, target: '' });
+              resolve();
+            }, delays[name] ?? 0);
+          }),
+      );
+    });
+  }
+
+  it('sends a call only after the one before it settled, so its timer runs while Companion works on it', async () => {
+    const seen: string[] = [];
+    await start(serialCompanion({ click: 150, look: 10 }, seen));
+    const client = new BridgeClient({ readTimeoutMs: 60, writeTimeoutMs: 400, sessionSheetMs: 0 });
+    try {
+      const both = await Promise.all([client.call('click', {}), client.call('look', {})]);
+      expect(both.map((r) => r.output)).toEqual(['click', 'look']);
+      expect(seen).toEqual(['start click', 'end click', 'start look', 'end look']);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('still sends the next call when the one before it failed or timed out', async () => {
+    await start(
+      helloThen((msg, socket) => {
+        if (msg.params?.name === 'see')
+          reply(socket, msg.id, { ok: true, output: 'see', target: '' });
+      }),
+    );
+    const client = new BridgeClient({ readTimeoutMs: 40, sessionSheetMs: 0, lateReplyCapMs: 60 });
+    try {
+      const [first, second] = await Promise.allSettled([
+        client.call('look', {}),
+        client.call('see', {}),
+      ]);
+      expect(first).toMatchObject({ status: 'rejected', reason: { code: 'timeout' } });
+      expect(second).toMatchObject({ status: 'fulfilled', value: { output: 'see' } });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('rejects a call still queued when it is closed, without connecting again', async () => {
+    await start(helloThen(() => undefined));
+    const client = new BridgeClient();
+    await client.connect();
+    const running = client.call('look', {}).catch((e: unknown) => e);
+    const queued = client.call('see', {}).catch((e: unknown) => e);
+    await client.close();
+    expect(await running).toMatchObject({ code: 'companion_unavailable' });
+    expect(await queued).toMatchObject({ code: 'companion_unavailable' });
+    expect(sockets).toHaveLength(1);
+    expect(client.isConnected).toBe(false);
+  });
+  // A timeout does not stop Companion: a call sent right after it would wait behind the old one.
+  it('sends the next call only after Companion answered the one that timed out', async () => {
+    const seen: string[] = [];
+    await start(serialCompanion({ look: 120, see: 10 }, seen));
+    const client = new BridgeClient({ readTimeoutMs: 40, sessionSheetMs: 0 });
+    try {
+      const [first, second] = await Promise.allSettled([
+        client.call('look', {}),
+        client.call('see', {}),
+      ]);
+      expect(first).toMatchObject({ status: 'rejected', reason: { code: 'timeout' } });
+      expect(second).toMatchObject({ status: 'fulfilled', value: { output: 'see' } });
+      expect(seen).toEqual(['start look', 'end look', 'start see', 'end see']);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('moves to a new connection when the call that timed out is never answered', async () => {
+    const frames: Array<{ connection: number; name?: string }> = [];
+    await start(
+      helloThen((msg, socket, connection) => {
+        frames.push({ connection, name: msg.params?.name });
+        if (connection > 1) reply(socket, msg.id, { ok: true, output: 'see', target: '' });
+      }),
+    );
+    const client = new BridgeClient({ readTimeoutMs: 40, sessionSheetMs: 0, lateReplyCapMs: 80 });
+    try {
+      const [first, second] = await Promise.allSettled([
+        client.call('look', {}),
+        client.call('see', {}),
+      ]);
+      expect(first).toMatchObject({ status: 'rejected', reason: { code: 'timeout' } });
+      expect(second).toMatchObject({ status: 'fulfilled' });
+      expect(frames).toEqual([
+        { connection: 1, name: 'look' },
+        { connection: 2, name: 'see' },
+      ]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  // The re-ask keeps its place: a type_text queued after a click must not overtake the click's retry.
+  it('retries a call before sending the ones queued behind it', async () => {
+    const frames: Array<{ connection: number; name?: string }> = [];
+    await start(
+      helloThen((msg, socket, connection) => {
+        frames.push({ connection, name: msg.params?.name });
+        if (connection === 1) {
+          socket.write(
+            JSON.stringify({ id: msg.id, error: { code: 'session_closed', message: 'x' } }) + '\n',
+          );
+        } else reply(socket, msg.id, { ok: true, output: String(msg.params?.name), target: '' });
+      }),
+    );
+    const client = new BridgeClient({ sessionSheetMs: 0 });
+    try {
+      const both = await Promise.all([client.call('click', {}), client.call('type_text', {})]);
+      expect(both.map((r) => r.output)).toEqual(['click', 'type_text']);
+      expect(frames).toEqual([
+        { connection: 1, name: 'click' },
+        { connection: 2, name: 'click' },
+        { connection: 2, name: 'type_text' },
+      ]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('does not re-ask for a call queued behind one the user denied', async () => {
+    await start(
+      helloThen((msg, socket) => {
+        const code = msg.params?.name === 'click' ? 'denied_by_user' : 'session_closed';
+        socket.write(JSON.stringify({ id: msg.id, error: { code, message: 'x' } }) + '\n');
+      }),
+    );
+    const client = new BridgeClient({ sessionSheetMs: 0 });
+    try {
+      const [first, second] = await Promise.allSettled([
+        client.call('click', {}),
+        client.call('type_text', {}),
+      ]);
+      expect(first).toMatchObject({ status: 'rejected', reason: { code: 'denied_by_user' } });
+      expect(second).toMatchObject({ status: 'rejected', reason: { code: 'session_closed' } });
+      expect(sockets).toHaveLength(1);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('keeps the line moving when Companion hangs up during a call', async () => {
+    await start(
+      helloThen((msg, socket, connection) => {
+        if (connection === 1) socket.destroy();
+        else reply(socket, msg.id, { ok: true, output: 'see', target: '' });
+      }),
+    );
+    const client = new BridgeClient({ sessionSheetMs: 0 });
+    try {
+      const [first, second] = await Promise.allSettled([
+        client.call('look', {}),
+        client.call('see', {}),
+      ]);
+      expect(first).toMatchObject({
+        status: 'rejected',
+        reason: { code: 'companion_unavailable' },
+      });
+      expect(second).toMatchObject({ status: 'fulfilled', value: { output: 'see' } });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('never sends a call the client cancelled while it waited in line', async () => {
+    const seen: string[] = [];
+    await start(serialCompanion({ look: 80 }, seen));
+    const client = new BridgeClient({ readTimeoutMs: 500, sessionSheetMs: 0 });
+    try {
+      const abort = new AbortController();
+      const running = client.call('look', {});
+      const queued = client.call('see', {}, abort.signal).catch((e: unknown) => e);
+      abort.abort();
+      await running;
+      expect(await queued).toMatchObject({ code: 'cancelled' });
+      expect(seen).toEqual(['start look', 'end look']);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('fails the call in flight with frame_too_large when its reply never ends under 64 KB', async () => {
+    await start(helloThen((_msg, socket) => socket.write('x'.repeat(70_000))));
+    const client = new BridgeClient({ sessionSheetMs: 0 });
+    await expect(client.call('look', {})).rejects.toMatchObject({ code: 'frame_too_large' });
+    expect(client.isConnected).toBe(false);
+  });
+
+  it('gives up at once on a call cancelled while it waits for a late reply', async () => {
+    await start(helloThen(() => undefined));
+    const client = new BridgeClient({
+      readTimeoutMs: 40,
+      sessionSheetMs: 0,
+      lateReplyCapMs: 5_000,
+    });
+    try {
+      const abort = new AbortController();
+      const running = client.call('look', {}).catch((e: unknown) => e);
+      const queued = client.call('see', {}, abort.signal).catch((e: unknown) => e);
+      expect(await running).toMatchObject({ code: 'timeout' });
+      const started = Date.now();
+      abort.abort();
+      expect(await queued).toMatchObject({ code: 'cancelled' });
+      expect(Date.now() - started).toBeLessThan(1_000);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('does not re-ask for a call that was cancelled while Companion had it', async () => {
+    const frames: Array<{ connection: number; name?: string }> = [];
+    const abort = new AbortController();
+    await start(
+      helloThen((msg, socket, connection) => {
+        frames.push({ connection, name: msg.params?.name });
+        abort.abort();
+        socket.write(
+          JSON.stringify({ id: msg.id, error: { code: 'session_closed', message: 'x' } }) + '\n',
+        );
+      }),
+    );
+    const client = new BridgeClient({ sessionSheetMs: 0 });
+    try {
+      await expect(client.call('click', {}, abort.signal)).rejects.toMatchObject({
+        code: 'cancelled',
+      });
+      expect(frames).toEqual([{ connection: 1, name: 'click' }]);
     } finally {
       await client.close();
     }

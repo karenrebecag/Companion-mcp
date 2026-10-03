@@ -25,6 +25,8 @@ describe('tool list follows Companion', () => {
   let toolSets: ToolSpec[][];
   let callResult: unknown;
   let helloError: unknown;
+  let heldCalls: string[];
+  let callsSeen: string[];
 
   beforeEach(() => {
     testDir = mkdtempSync(join(tmpdir(), 'companion-tools-'));
@@ -33,6 +35,8 @@ describe('tool list follows Companion', () => {
     toolSets = [];
     callResult = undefined;
     helloError = undefined;
+    heldCalls = [];
+    callsSeen = [];
     netServer = null;
   });
 
@@ -57,7 +61,16 @@ describe('tool list follows Companion', () => {
           buffer = lines.pop() ?? '';
           for (const line of lines) {
             if (!line) continue;
-            const msg = JSON.parse(line) as { id: number; method: string };
+            const msg = JSON.parse(line) as {
+              id: number;
+              method: string;
+              params?: { name?: string };
+            };
+            if (msg.method === 'call') {
+              const name = String(msg.params?.name);
+              callsSeen.push(name);
+              if (heldCalls.includes(name)) continue;
+            }
             if (msg.method === 'hello' && helloError) {
               socket.write(JSON.stringify({ id: msg.id, error: helloError }) + '\n');
               continue;
@@ -387,5 +400,27 @@ describe('tool list follows Companion', () => {
     const text = statusText(await mcp.callTool({ name: 'companion_status', arguments: {} }));
     expect(text).toContain('wait a minute');
     expect(text).not.toMatch(/[\u{E0049}\u{202E}]/u);
+  });
+
+  // The agent's client can cancel a call; one still waiting its turn must never reach Companion.
+  it('never sends a tool call the MCP client cancelled while it waited in line', async () => {
+    toolSets = [[spec('look'), spec('see')]];
+    heldCalls = ['look'];
+    await startCompanion();
+    const bridge = new BridgeClient({ readTimeoutMs: 100, sessionSheetMs: 0, lateReplyCapMs: 50 });
+    const { mcp } = await connectMcp(bridge);
+    const running = mcp.callTool({ name: 'look', arguments: {} });
+    await vi.waitFor(() => expect(callsSeen).toEqual(['look']));
+    const abort = new AbortController();
+    const queued = mcp
+      .callTool({ name: 'see', arguments: {} }, undefined, { signal: abort.signal })
+      .catch(() => 'cancelled');
+    abort.abort();
+    expect(await queued).toBe('cancelled');
+    await running;
+    // Past look's timeout and the late-reply cap: a see that slipped through would be on the wire.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(callsSeen).toEqual(['look']);
+    await bridge.close();
   });
 });
