@@ -7,6 +7,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeError } from '../bridge/errors.js';
 import { stripInvisible } from './screen-text.js';
+import { withNextAction } from './next-action.js';
 
 // Same ceiling as a server error: enough for a sentence, too short to smuggle a page in.
 const MAX_ERROR_MESSAGE = 300;
@@ -24,8 +25,9 @@ export function errorResult(code: string, message: string): CallToolResult {
   const flat = Array.from(stripInvisible(message).replace(/\s+/g, ' '))
     .slice(0, MAX_ERROR_MESSAGE)
     .join('');
+  // After the cap: the hint is our text, not the screen's, and cutting it would lose the action.
   return {
-    content: [{ type: 'text', text: `error[${safeCode}]: ${flat}` }],
+    content: [{ type: 'text', text: `error[${safeCode}]: ${withNextAction(safeCode, flat)}` }],
     isError: true,
   };
 }

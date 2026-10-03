@@ -62,7 +62,7 @@ const NOT_RUNNING_MESSAGE =
   'check Ajustes › Agentes › "Prestar las manos a otros agentes", then retry. ' +
   'open_app cannot start it: it runs inside Companion.';
 // Opening Companion would not fix this one: the files exist but belong to another user.
-const PERMISSION_MESSAGE =
+export const PERMISSION_MESSAGE =
   "Companion's bridge files cannot be opened by this process (permission denied). " +
   'Run Claude Code as the same macOS user that runs Companion, then retry.';
 // Companion rejects these before running the call, and a new hello reopens the session.
@@ -73,13 +73,13 @@ const DEFAULT_REASK_AFTER_DENIAL_MS = 60_000;
 // How long the next call waits for Companion to finish one that timed out before giving up on the
 // connection. Past a sheet's own 60 s expiry, so a call stuck behind an approval gets its answer.
 const DEFAULT_LATE_REPLY_CAP_MS = 65_000;
-const DENIED_RECENTLY_MESSAGE =
+export const DENIED_RECENTLY_MESSAGE =
   'The user said no to the hands a moment ago. Ask the user before trying again; ' +
   'a call after a minute opens a new approval sheet on the Mac.';
-const REASKING_MESSAGE =
+export const REASKING_MESSAGE =
   'Companion closed the session while this call was waiting; it may have happened. Look before retrying.';
 // Companion serves one connection; its own busy text names neither the cause nor the way out.
-const BUSY_MESSAGE =
+export const BUSY_MESSAGE =
   "Another agent session already holds Companion's hands, and Companion serves one at a time. " +
   'Close that session (or its companion MCP server), then retry.';
 

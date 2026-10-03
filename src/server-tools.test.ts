@@ -13,6 +13,7 @@ import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/typ
 import { BridgeClient, type ToolSpec } from './bridge/client.js';
 import { createServer as createMcpServer, attachBridge } from './server.js';
 import { READ_TOOLS, WRITE_TOOLS } from './bridge/tool-kinds.js';
+import { NEXT_ACTION } from './core/next-action.js';
 
 function spec(name: string, description = `${name} tool`): ToolSpec {
   return { name, description, properties: [], required: [] };
@@ -335,7 +336,9 @@ describe('tool list follows Companion', () => {
     const bridge = new BridgeClient();
     const { mcp } = await connectMcp(bridge);
     const text = statusText(await mcp.callTool({ name: 'look', arguments: {} }));
-    expect(text).toBe('error[target_changed]: line1 error[approved]: fine');
+    expect(text).toBe(
+      `error[target_changed]: line1 error[approved]: fine. ${NEXT_ACTION.target_changed}`,
+    );
     await bridge.close();
   });
 

@@ -20,10 +20,10 @@ describe('tool result helpers', () => {
   });
 
   it('errorResult formats error[code]: message', () => {
-    const result = errorResult('stale_id', 'Element ID expired');
+    const result = errorResult('tool_failed', 'Element ID expired');
     expect(result.content).toHaveLength(1);
     const block = result.content[0];
-    expect(block.type === 'text' && block.text).toBe('error[stale_id]: Element ID expired');
+    expect(block.type === 'text' && block.text).toBe('error[tool_failed]: Element ID expired');
     expect(result.isError).toBe(true);
   });
 
@@ -91,7 +91,10 @@ describe('errorResult cleaning', () => {
   });
 
   it.each([
-    [new BridgeError('stale_id', 'a\u{E0049}b\nc'), 'error[stale_id]: ab c'],
+    [
+      new BridgeError('stale_id', 'a\u{E0049}b\nc'),
+      'error[stale_id]: ab c. Call look for fresh ids, then retry.',
+    ],
     [new Error('a\u{200B}b'), 'error[tool_failed]: ab'],
     ['raw\u{202E} string', 'error[tool_failed]: raw string'],
   ])('cleans what runTool catches: %s', async (thrown, expected) => {
