@@ -11,6 +11,7 @@ import { getSocketPath, getTokenPath } from './paths.js';
 import { stripInvisible } from '../core/screen-text.js';
 import { BridgeError } from './errors.js';
 import { isWriteTool } from './tool-kinds.js';
+import { parseHello, parseCallResult } from './hello.js';
 
 export { BridgeError };
 
@@ -304,7 +305,7 @@ export class BridgeClient {
         timeoutConfig.ms + sheet,
         timeoutConfig.code,
       );
-      return result as CallResult;
+      return parseCallResult(result);
     } finally {
       // Once the first call settles the sheet is gone; a newer hello has its own sheet.
       if (raisesSheet && hello === this.helloCount) this.sessionSheetUp = false;
@@ -346,13 +347,15 @@ export class BridgeClient {
       throw closed;
     }
     try {
-      const hello = (await this.request(
-        { method: 'hello', params: { token, client: 'claude-code', protocol: 1 } },
-        this.options.readTimeoutMs ?? DEFAULT_READ_TIMEOUT_MS,
-        'timeout',
-      )) as HelloResult;
+      const hello = parseHello(
+        await this.request(
+          { method: 'hello', params: { token, client: 'claude-code', protocol: 1 } },
+          this.options.readTimeoutMs ?? DEFAULT_READ_TIMEOUT_MS,
+          'timeout',
+        ),
+      );
       this.session = hello.session;
-      this.tools = hello.tools;
+      if (hello.tools) this.tools = hello.tools;
       this.helloCount += 1;
       this.sessionSheetUp = true;
       this.sheetClaimed = false;
