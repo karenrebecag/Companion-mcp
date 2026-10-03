@@ -9,6 +9,7 @@ import { createConnection, Socket } from 'net';
 import { readFileSync } from 'fs';
 import { getSocketPath, getTokenPath } from './paths.js';
 import { BridgeError } from './errors.js';
+import { isWriteTool } from './tool-kinds.js';
 
 export { BridgeError };
 
@@ -46,6 +47,9 @@ interface PendingRequest {
 const MAX_LINE_SIZE = 65_536;
 const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const DEFAULT_WRITE_TIMEOUT_MS = 130_000;
+// Companion's sheets auto-deny after 60 s; the first call of a connection waits for the session
+// sheet before it even starts, read or not.
+const DEFAULT_SESSION_SHEET_MS = 65_000;
 const NEWLINE = 0x0a;
 // Long enough for a local socket to flush one line, short enough not to stall the shim's exit.
 const BYE_FLUSH_MS = 500;
@@ -128,20 +132,11 @@ interface BridgeClientOptions {
   readTimeoutMs?: number;
   writeTimeoutMs?: number;
   reaskAfterDenialMs?: number;
+  sessionSheetMs?: number;
 }
 
 function getTimeoutForTool(name: string, options: BridgeClientOptions): TimeoutConfig {
-  const writeTools = [
-    'click',
-    'type_text',
-    'press_key',
-    'scroll',
-    'menu',
-    'open_app',
-    'open_url',
-    'open_file',
-  ];
-  const isWrite = writeTools.includes(name);
+  const isWrite = isWriteTool(name);
   return {
     ms: isWrite
       ? (options.writeTimeoutMs ?? DEFAULT_WRITE_TIMEOUT_MS)
@@ -164,6 +159,11 @@ export class BridgeClient {
   // pending calls says nothing about whether they ran.
   private replies = new WeakMap<BridgeError, Socket>();
   private lastRefusalAt = -Infinity;
+  // From each hello until the first call after it settles, the session sheet may be up, and
+  // Companion serves one line at a time: every call sent meanwhile waits behind that sheet.
+  private sessionSheetUp = false;
+  private sheetClaimed = false;
+  private helloCount = 0;
   private nextId = 1;
   private pending = new Map<number, PendingRequest>();
   private options: BridgeClientOptions;
@@ -222,12 +222,23 @@ export class BridgeClient {
   private async callOnce(name: string, args: Record<string, unknown>): Promise<CallResult> {
     await this.connect();
     const timeoutConfig = getTimeoutForTool(name, this.options);
-    const result = await this.request(
-      { method: 'call', params: { name, arguments: args } },
-      timeoutConfig.ms,
-      timeoutConfig.code,
-    );
-    return result as CallResult;
+    const sheet = this.sessionSheetUp
+      ? (this.options.sessionSheetMs ?? DEFAULT_SESSION_SHEET_MS)
+      : 0;
+    const raisesSheet = this.sessionSheetUp && !this.sheetClaimed;
+    if (raisesSheet) this.sheetClaimed = true;
+    const hello = this.helloCount;
+    try {
+      const result = await this.request(
+        { method: 'call', params: { name, arguments: args } },
+        timeoutConfig.ms + sheet,
+        timeoutConfig.code,
+      );
+      return result as CallResult;
+    } finally {
+      // Once the first call settles the sheet is gone; a newer hello has its own sheet.
+      if (raisesSheet && hello === this.helloCount) this.sessionSheetUp = false;
+    }
   }
 
   async close(): Promise<void> {
@@ -272,6 +283,9 @@ export class BridgeClient {
       )) as HelloResult;
       this.session = hello.session;
       this.tools = hello.tools;
+      this.helloCount += 1;
+      this.sessionSheetUp = true;
+      this.sheetClaimed = false;
       this.ready = true;
     } catch (err) {
       this.teardown(socket, err instanceof Error ? err : new Error(String(err)));

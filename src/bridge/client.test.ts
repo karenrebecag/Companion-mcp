@@ -338,9 +338,11 @@ describe('BridgeClient', () => {
       // Never respond to call, so it times out.
     });
 
+    // No session sheet in this fake: only the per-call timeout is under test.
     const client = new BridgeClient({
       readTimeoutMs: 50,
       writeTimeoutMs: 50,
+      sessionSheetMs: 0,
     });
     await client.connect();
 
@@ -375,9 +377,11 @@ describe('BridgeClient', () => {
       // Never respond to call, so it times out.
     });
 
+    // No session sheet in this fake: only the per-call timeout is under test.
     const client = new BridgeClient({
       readTimeoutMs: 50,
       writeTimeoutMs: 50,
+      sessionSheetMs: 0,
     });
     await client.connect();
 

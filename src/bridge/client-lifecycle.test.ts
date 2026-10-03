@@ -97,7 +97,7 @@ describe('BridgeClient lifecycle', () => {
         } else answer();
       }),
     );
-    const client = new BridgeClient({ readTimeoutMs: 50 });
+    const client = new BridgeClient({ readTimeoutMs: 50, sessionSheetMs: 0 });
     await client.connect();
     await expect(client.call('look', {})).rejects.toMatchObject({ code: 'timeout' });
     await new Promise((r) => setTimeout(r, 80));
@@ -520,5 +520,150 @@ describe('BridgeClient lifecycle', () => {
     await expect(client.call('look', {})).rejects.toMatchObject({ code: 'session_closed' });
     expect(sockets).toHaveLength(1);
     await client.close();
+  });
+
+  // H4: the browser actions open a per-call sheet like click does; a read timeout made the agent
+  // resend a click or a type_text that still ran once the user approved. A tool Companion adds
+  // later is held to the same, until the list says it only reads.
+  it.each([
+    'browser_click',
+    'browser_type',
+    'browser_navigate',
+    'browser_open',
+    'browser_take',
+    'browser_release',
+    'some_future_tool',
+  ])('%s waits like an action and times out as approval_timeout', async (name) => {
+    await start(
+      helloThen((msg, socket) => {
+        if (msg.params?.name === 'look') {
+          return reply(socket, msg.id, { ok: true, output: '', target: '' });
+        }
+        if ((msg.params?.arguments as { late?: boolean } | undefined)?.late) return;
+        setTimeout(() => reply(socket, msg.id, { ok: true, output: 'done', target: '' }), 90);
+      }),
+    );
+    const client = new BridgeClient({ readTimeoutMs: 30, writeTimeoutMs: 200, sessionSheetMs: 0 });
+    try {
+      await client.call('look', {});
+      await expect(client.call(name, {})).resolves.toMatchObject({ output: 'done' });
+      const quick = new BridgeClient({ readTimeoutMs: 10, writeTimeoutMs: 30, sessionSheetMs: 0 });
+      try {
+        await expect(quick.call(name, { late: true })).rejects.toMatchObject({
+          code: 'approval_timeout',
+        });
+      } finally {
+        await quick.close();
+      }
+    } finally {
+      await client.close();
+    }
+  });
+
+  // The first call of a connection raises the session sheet before anything runs, read or not.
+  it.each(['look', 'browser_click'])(
+    'gives %s, as the first call after hello, the time of the session sheet',
+    async (name) => {
+      await start(
+        helloThen((msg, socket) => {
+          setTimeout(() => reply(socket, msg.id, { ok: true, output: 'x', target: '' }), 90);
+        }),
+      );
+      const client = new BridgeClient({
+        readTimeoutMs: 30,
+        writeTimeoutMs: 30,
+        sessionSheetMs: 150,
+      });
+      try {
+        await expect(client.call(name, {})).resolves.toMatchObject({ ok: true });
+        await expect(client.call(name, {})).rejects.toMatchObject({
+          code: name === 'look' ? 'timeout' : 'approval_timeout',
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  it('gives the sheet time again after a reconnect, because Companion asks again', async () => {
+    await start(
+      helloThen((msg, socket) => {
+        setTimeout(() => reply(socket, msg.id, { ok: true, output: 'x', target: '' }), 90);
+      }),
+    );
+    const client = new BridgeClient({ readTimeoutMs: 30, sessionSheetMs: 150 });
+    try {
+      await client.call('look', {});
+      sockets[0].destroy();
+      await vi.waitFor(() => expect(client.isConnected).toBe(false));
+      await expect(client.call('look', {})).resolves.toMatchObject({ ok: true });
+      expect(sockets).toHaveLength(2);
+    } finally {
+      await client.close();
+    }
+  });
+
+  // Companion handles one line at a time, so a call sent while the session sheet is up waits
+  // behind it as long as the first one does.
+  it('gives every call sent while the session sheet is up the time of that sheet', async () => {
+    let queue = Promise.resolve();
+    await start(
+      helloThen((msg, socket) => {
+        queue = queue.then(
+          () =>
+            new Promise<void>((resolve) =>
+              setTimeout(() => {
+                reply(socket, msg.id, { ok: true, output: String(msg.id), target: '' });
+                resolve();
+              }, 90),
+            ),
+        );
+      }),
+    );
+    const client = new BridgeClient({ readTimeoutMs: 30, sessionSheetMs: 250 });
+    try {
+      const both = await Promise.all([client.call('look', {}), client.call('see', {})]);
+      expect(both.map((r) => r.ok)).toEqual([true, true]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('gives the retry after session_closed the time of the new session sheet', async () => {
+    await start(
+      helloThen((msg, socket, connection) => {
+        if (connection === 1) {
+          socket.write(
+            JSON.stringify({ id: msg.id, error: { code: 'session_closed', message: 'x' } }) + '\n',
+          );
+        } else {
+          setTimeout(() => reply(socket, msg.id, { ok: true, output: 'x', target: '' }), 90);
+        }
+      }),
+    );
+    const client = new BridgeClient({ readTimeoutMs: 30, sessionSheetMs: 150 });
+    try {
+      await expect(client.call('look', {})).resolves.toMatchObject({ ok: true });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('spends the sheet time on the first call even when that call fails', async () => {
+    await start(
+      helloThen((msg, socket) => {
+        if (msg.params?.name === 'see') {
+          setTimeout(() => reply(socket, msg.id, { ok: true, output: 'x', target: '' }), 90);
+        }
+      }),
+    );
+    // 30 + 100 ms would let the 90 ms reply through: only a spent allowance makes it time out.
+    const client = new BridgeClient({ readTimeoutMs: 30, sessionSheetMs: 100 });
+    try {
+      await expect(client.call('look', {})).rejects.toMatchObject({ code: 'timeout' });
+      await expect(client.call('see', {})).rejects.toMatchObject({ code: 'timeout' });
+    } finally {
+      await client.close();
+    }
   });
 });
