@@ -388,6 +388,16 @@ describe('tool list follows Companion', () => {
     },
   );
 
+  // Scroll and hover need no sheet in Companion, but they act on a controlled tab and count
+  // against its write budget, so they are timed and annotated as actions.
+  it.each(['browser_scroll', 'browser_hover'])(
+    'lists %s as an action, as Companion buckets it',
+    (name) => {
+      expect(WRITE_TOOLS.has(name)).toBe(true);
+      expect(READ_TOOLS.has(name)).toBe(false);
+    },
+  );
+
   it('never lists a tool as both a read and an action', () => {
     expect([...READ_TOOLS].filter((n) => WRITE_TOOLS.has(n))).toEqual([]);
   });
