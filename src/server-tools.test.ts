@@ -122,6 +122,35 @@ describe('tool list follows Companion', () => {
     await bridge.close();
   });
 
+  it('a misspelled or oversized argument never reaches Companion', async () => {
+    toolSets = [
+      [
+        {
+          name: 'type_text',
+          description: 'type',
+          properties: [{ name: 'text', type: 'string', description: 'what to type' }],
+          required: ['text'],
+        },
+      ],
+    ];
+    await startCompanion();
+    const bridge = new BridgeClient();
+    const { mcp } = await connectMcp(bridge);
+    const refusal = async (args: Record<string, unknown>): Promise<string> => {
+      try {
+        return statusText(await mcp.callTool({ name: 'type_text', arguments: args }));
+      } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+      }
+    };
+    expect(await refusal({ text: 'hi', txet: 'hi' })).toMatch(/txet|unrecognized/i);
+    expect(await refusal({ text: 'a'.repeat(16_001) })).toMatch(/16000 UTF-8 bytes/);
+    expect(callsSeen).not.toContain('type_text');
+    await mcp.callTool({ name: 'type_text', arguments: { text: 'hi' } });
+    expect(callsSeen).toContain('type_text');
+    await bridge.close();
+  });
+
   it('says what to do when Companion is still closed', async () => {
     const bridge = new BridgeClient();
     const { mcp } = await connectMcp(bridge);
