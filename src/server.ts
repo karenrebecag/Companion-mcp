@@ -210,9 +210,9 @@ function registerBridgeTool(
         openWorldHint: true,
       },
     },
-    async (args: unknown) => {
+    async (args: unknown, extra: { signal: AbortSignal }) => {
       return runTool(async () => {
-        const result = await client.call(spec.name, args as Record<string, unknown>);
+        const result = await client.call(spec.name, args as Record<string, unknown>, extra.signal);
         // The call may have reconnected, and that hello may carry a different tool set.
         sync();
         return handleCallResult(result);

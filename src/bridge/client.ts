@@ -70,6 +70,9 @@ const SESSION_GONE_CODES = new Set(['session_closed', 'no_session']);
 // The user's own no, or Companion's cooldown after several: a new sheet right away would nag.
 const REFUSAL_CODES = new Set(['denied_by_user', 'cooling_down']);
 const DEFAULT_REASK_AFTER_DENIAL_MS = 60_000;
+// How long the next call waits for Companion to finish one that timed out before giving up on the
+// connection. Past a sheet's own 60 s expiry, so a call stuck behind an approval gets its answer.
+const DEFAULT_LATE_REPLY_CAP_MS = 65_000;
 const DENIED_RECENTLY_MESSAGE =
   'The user said no to the hands a moment ago. Ask the user before trying again; ' +
   'a call after a minute opens a new approval sheet on the Mac.';
@@ -135,6 +138,7 @@ interface BridgeClientOptions {
   writeTimeoutMs?: number;
   reaskAfterDenialMs?: number;
   sessionSheetMs?: number;
+  lateReplyCapMs?: number;
 }
 
 function getTimeoutForTool(name: string, options: BridgeClientOptions): TimeoutConfig {
@@ -145,6 +149,14 @@ function getTimeoutForTool(name: string, options: BridgeClientOptions): TimeoutC
       : (options.readTimeoutMs ?? DEFAULT_READ_TIMEOUT_MS),
     code: isWrite ? 'approval_timeout' : 'timeout',
   };
+}
+
+function untilAborted(signal: AbortSignal | undefined): Promise<void> {
+  if (!signal) return new Promise<void>(() => undefined);
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) =>
+    signal.addEventListener('abort', () => resolve(), { once: true }),
+  );
 }
 
 export class BridgeClient {
@@ -166,6 +178,13 @@ export class BridgeClient {
   private sessionSheetUp = false;
   private sheetClaimed = false;
   private helloCount = 0;
+  // Companion serves one line at a time, so a call sent behind another waits there with its timer
+  // running, and still runs after the agent was told it timed out. One call on the wire at a time
+  // keeps each timer on the call Companion is actually working on.
+  private lane: Promise<unknown> = Promise.resolve();
+  // Calls that timed out here but that Companion may still be running: the next call waits for
+  // their late reply, or the connection drops, so it never queues behind them inside Companion.
+  private late = new Map<number, { answered: Promise<void>; settle: () => void }>();
   private nextId = 1;
   private pending = new Map<number, PendingRequest>();
   private options: BridgeClientOptions;
@@ -189,9 +208,36 @@ export class BridgeClient {
     return this.connecting;
   }
 
-  async call(name: string, args: Record<string, unknown>): Promise<CallResult> {
+  call(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<CallResult> {
+    const generation = this.generation;
+    // Checked before each send, the first and the retry: a call cancelled or closed while it waited
+    // must never reach Companion. A call already on the wire is not recalled; Companion has it.
+    const mayStillSend = (): void => {
+      if (generation !== this.generation) {
+        throw new BridgeError('companion_unavailable', 'Socket closed');
+      }
+      if (signal?.aborted) {
+        throw new BridgeError('cancelled', 'Cancelled before it was sent to Companion.');
+      }
+    };
+    const turn = this.lane.then(async () => {
+      // The late-reply wait can last up to its cap; a cancel ends it for this call at once.
+      await Promise.race([this.settleLate(), untilAborted(signal)]);
+      mayStillSend();
+      return this.attempt(name, args, mayStillSend);
+    });
+    this.lane = turn.catch(() => undefined);
+    return turn;
+  }
+
+  // Runs inside the lane, retry included, so a re-asked call keeps its place in line.
+  private async attempt(
+    name: string,
+    args: Record<string, unknown>,
+    mayStillSend: () => void,
+  ): Promise<CallResult> {
     try {
-      return await this.callOnce(name, args);
+      return await this.send(name, args);
     } catch (err) {
       if (!(err instanceof BridgeError)) throw err;
       this.noteRefusal(err);
@@ -207,8 +253,9 @@ export class BridgeClient {
       if (this.socket === answered) {
         this.teardown(answered, new BridgeError('companion_unavailable', REASKING_MESSAGE));
       }
+      mayStillSend();
       try {
-        return await this.callOnce(name, args);
+        return await this.send(name, args);
       } catch (retryErr) {
         // A "no" on the sheet the retry opened must start the pause too, or the next call re-asks.
         this.noteRefusal(retryErr);
@@ -221,7 +268,24 @@ export class BridgeClient {
     if (err instanceof BridgeError && REFUSAL_CODES.has(err.code)) this.lastRefusalAt = Date.now();
   }
 
-  private async callOnce(name: string, args: Record<string, unknown>): Promise<CallResult> {
+  private async settleLate(): Promise<void> {
+    if (this.late.size === 0) return;
+    let cap: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<void>((resolve) => {
+      cap = setTimeout(resolve, this.options.lateReplyCapMs ?? DEFAULT_LATE_REPLY_CAP_MS);
+    });
+    await Promise.race([Promise.all([...this.late.values()].map((l) => l.answered)), expired]);
+    clearTimeout(cap);
+    // Still unanswered: that connection may never free up, so the next call goes on a new one.
+    if (this.late.size > 0 && this.socket) {
+      this.teardown(
+        this.socket,
+        new BridgeError('companion_unavailable', 'Companion did not answer a call that timed out'),
+      );
+    }
+  }
+
+  private async send(name: string, args: Record<string, unknown>): Promise<CallResult> {
     await this.connect();
     const timeoutConfig = getTimeoutForTool(name, this.options);
     const sheet = this.sessionSheetUp
@@ -393,6 +457,13 @@ export class BridgeClient {
       return;
     }
 
+    const late = this.late.get(msgId);
+    if (late) {
+      this.late.delete(msgId);
+      late.settle();
+      return;
+    }
+
     const pending = this.pending.get(msgId);
     if (!pending) {
       // Stale ID or out-of-order response.
@@ -446,6 +517,7 @@ export class BridgeClient {
     return new Promise<unknown>((resolve, reject) => {
       const timeoutHandle = setTimeout(() => {
         this.pending.delete(id);
+        if (body.method === 'call') this.expectLate(id);
         reject(new BridgeError(timeoutCode, `Request ${id} timed out`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timeoutHandle });
@@ -455,6 +527,14 @@ export class BridgeClient {
       }
       socket.write(line);
     });
+  }
+
+  private expectLate(id: number): void {
+    let settle = (): void => undefined;
+    const answered = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    this.late.set(id, { answered, settle });
   }
 
   private teardown(socket: Socket, reason: Error): void {
@@ -468,5 +548,8 @@ export class BridgeClient {
       pending.reject(reason);
     }
     this.pending.clear();
+    // Whatever the old connection was still running, the next call goes on a new one.
+    for (const [, late] of this.late) late.settle();
+    this.late.clear();
   }
 }
