@@ -517,6 +517,8 @@ describe('BridgeClient lifecycle', () => {
     'browser_click',
     'browser_double_click',
     'browser_right_click',
+    'browser_scroll',
+    'browser_hover',
     'browser_type',
     'browser_select',
     'browser_navigate',
