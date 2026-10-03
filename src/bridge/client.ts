@@ -60,6 +60,16 @@ const NOT_RUNNING_MESSAGE =
 const PERMISSION_MESSAGE =
   "Companion's bridge files cannot be opened by this process (permission denied). " +
   'Run Claude Code as the same macOS user that runs Companion, then retry.';
+// Companion rejects these before running the call, and a new hello reopens the session.
+const SESSION_GONE_CODES = new Set(['session_closed', 'no_session']);
+// The user's own no, or Companion's cooldown after several: a new sheet right away would nag.
+const REFUSAL_CODES = new Set(['denied_by_user', 'cooling_down']);
+const DEFAULT_REASK_AFTER_DENIAL_MS = 60_000;
+const DENIED_RECENTLY_MESSAGE =
+  'The user said no to the hands a moment ago. Ask the user before trying again; ' +
+  'a call after a minute opens a new approval sheet on the Mac.';
+const REASKING_MESSAGE =
+  'Companion closed the session while this call was waiting; it may have happened. Look before retrying.';
 // Companion serves one connection; its own busy text names neither the cause nor the way out.
 const BUSY_MESSAGE =
   "Another agent session already holds Companion's hands, and Companion serves one at a time. " +
@@ -117,6 +127,7 @@ interface TimeoutConfig {
 interface BridgeClientOptions {
   readTimeoutMs?: number;
   writeTimeoutMs?: number;
+  reaskAfterDenialMs?: number;
 }
 
 function getTimeoutForTool(name: string, options: BridgeClientOptions): TimeoutConfig {
@@ -149,6 +160,10 @@ export class BridgeClient {
   private hangUpReason: BridgeError | null = null;
   // Bumped by close(), so a connect still dialing when close() runs does not leave a live socket.
   private generation = 0;
+  // Only errors Companion sent in reply to that very request: a teardown's error reaching other
+  // pending calls says nothing about whether they ran.
+  private replies = new WeakMap<BridgeError, Socket>();
+  private lastRefusalAt = -Infinity;
   private nextId = 1;
   private pending = new Map<number, PendingRequest>();
   private options: BridgeClientOptions;
@@ -173,6 +188,38 @@ export class BridgeClient {
   }
 
   async call(name: string, args: Record<string, unknown>): Promise<CallResult> {
+    try {
+      return await this.callOnce(name, args);
+    } catch (err) {
+      if (!(err instanceof BridgeError)) throw err;
+      this.noteRefusal(err);
+      const answered = this.replies.get(err);
+      if (!answered || !SESSION_GONE_CODES.has(err.code)) throw err;
+      const pause = this.options.reaskAfterDenialMs ?? DEFAULT_REASK_AFTER_DENIAL_MS;
+      if (Date.now() - this.lastRefusalAt < pause) {
+        throw new BridgeError(err.code, DENIED_RECENTLY_MESSAGE);
+      }
+      // A denied or expired sheet leaves the session closed until the idle close, with nothing the
+      // agent can do. A fresh hello asks again; Companion rejected this call before running it, so
+      // resending it once is safe, and only once so a second "no" reaches the agent.
+      if (this.socket === answered) {
+        this.teardown(answered, new BridgeError('companion_unavailable', REASKING_MESSAGE));
+      }
+      try {
+        return await this.callOnce(name, args);
+      } catch (retryErr) {
+        // A "no" on the sheet the retry opened must start the pause too, or the next call re-asks.
+        this.noteRefusal(retryErr);
+        throw retryErr;
+      }
+    }
+  }
+
+  private noteRefusal(err: unknown): void {
+    if (err instanceof BridgeError && REFUSAL_CODES.has(err.code)) this.lastRefusalAt = Date.now();
+  }
+
+  private async callOnce(name: string, args: Record<string, unknown>): Promise<CallResult> {
     await this.connect();
     const timeoutConfig = getTimeoutForTool(name, this.options);
     const result = await this.request(
@@ -343,7 +390,9 @@ export class BridgeClient {
     if (msg.result) {
       pending.resolve(msg.result);
     } else if (error) {
-      pending.reject(serverError(error));
+      const reply = serverError(error);
+      this.replies.set(reply, socket);
+      pending.reject(reply);
     } else {
       pending.reject(new BridgeError('unknown_error', 'Malformed response'));
     }
