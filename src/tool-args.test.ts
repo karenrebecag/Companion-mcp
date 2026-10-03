@@ -129,4 +129,38 @@ describe('tool arguments', () => {
     expect(schema.safeParse({ id: 3.5 }).success).toBe(false);
     expect(schema.safeParse({}).success).toBe(false);
   });
+
+  // Enum values reach the agent in the schema and in every validation error: a hostile or
+  // oversized list is ignored, which leaves the plain capped string and Companion's own check.
+  it.each([
+    ['too many values', Array.from({ length: 51 }, (_, i) => `v${i}`)],
+    ['a value too long', ['up', 'x'.repeat(65)]],
+    ['a control character', ['up', 'do\nwn']],
+    ['an invisible character', ['up', 'do\u200Bwn']],
+    ['an empty value', ['up', '']],
+    ['a DEL character', ['up', 'a\x7Fb']],
+    ['a line separator', ['up', 'a\u2028b']],
+    ['a non-string member', ['up', 7]],
+  ])('an enum with %s is ignored', (_label, values) => {
+    const spec = {
+      name: 't',
+      description: 't',
+      properties: [{ name: 'a', type: 'string', description: 'a', enum: values }],
+      required: ['a'],
+    } as unknown as ToolSpec;
+    expect(buildSchemaForTool(spec).safeParse({ a: 'zzz' }).success).toBe(true);
+  });
+
+  it('an enum within the caps is still enforced', () => {
+    const values = [...Array.from({ length: 49 }, (_, i) => `v${i}`), 'x'.repeat(64)];
+    const spec = {
+      name: 't',
+      description: 't',
+      properties: [{ name: 'a', type: 'string', description: 'a', enum: values }],
+      required: ['a'],
+    } as unknown as ToolSpec;
+    expect(buildSchemaForTool(spec).safeParse({ a: 'zzz' }).success).toBe(false);
+    expect(buildSchemaForTool(spec).safeParse({ a: 'v48' }).success).toBe(true);
+    expect(buildSchemaForTool(spec).safeParse({ a: 'x'.repeat(64) }).success).toBe(true);
+  });
 });

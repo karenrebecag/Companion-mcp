@@ -6,17 +6,34 @@
  */
 import { z } from 'zod';
 import type { ToolSpec } from './bridge/client.js';
+import { stripInvisible } from './core/screen-text.js';
 
 // Incredible's text limit. Per string, not per call: Companion's 64 KB line limit still guards the frame.
 export const MAX_STRING_BYTES = 16_000;
 
 type Property = ToolSpec['properties'][number];
 
+// Enum values reach the agent in the schema and in every validation error.
+const MAX_ENUM_VALUES = 50;
+const MAX_ENUM_VALUE_LENGTH = 64;
+
+function plainChoice(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_ENUM_VALUE_LENGTH &&
+    // eslint-disable-next-line no-control-regex
+    !/[\x00-\x1F\x7F\u2028\u2029]/.test(value) &&
+    stripInvisible(value) === value
+  );
+}
+
 // The hello is Companion's word, not proof: a constraint of the wrong shape is ignored, not trusted.
 function declaredEnum(prop: Property): [string, ...string[]] | undefined {
   const values = prop.enum;
-  if (!Array.isArray(values) || values.length === 0) return undefined;
-  if (!values.every((v): v is string => typeof v === 'string')) return undefined;
+  if (!Array.isArray(values) || values.length === 0 || values.length > MAX_ENUM_VALUES)
+    return undefined;
+  if (!values.every(plainChoice)) return undefined;
   return values as [string, ...string[]];
 }
 

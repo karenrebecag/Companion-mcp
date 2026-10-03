@@ -26,6 +26,7 @@ describe('tool list follows Companion', () => {
   let toolSets: ToolSpec[][];
   let callResult: unknown;
   let helloError: unknown;
+  let sessionlessHellos: number;
   let heldCalls: string[];
   let callsSeen: string[];
 
@@ -36,6 +37,7 @@ describe('tool list follows Companion', () => {
     toolSets = [];
     callResult = undefined;
     helloError = undefined;
+    sessionlessHellos = 0;
     heldCalls = [];
     callsSeen = [];
     netServer = null;
@@ -78,7 +80,9 @@ describe('tool list follows Companion', () => {
             }
             const result =
               msg.method === 'hello'
-                ? { session: `s${sockets.length}`, language: 'en', accessibility: true, tools }
+                ? sockets.length <= sessionlessHellos
+                  ? { language: 'en', accessibility: true, tools }
+                  : { session: `s${sockets.length}`, language: 'en', accessibility: true, tools }
                 : (callResult ?? { ok: true, output: 'done', target: '' });
             socket.write(JSON.stringify({ id: msg.id, result }) + '\n');
           }
@@ -119,6 +123,75 @@ describe('tool list follows Companion', () => {
     expect(statusText(status)).toMatch(/connected/i);
     expect(await names()).toEqual(['click', 'companion_status', 'look']);
     await vi.waitFor(() => expect(listChanged()).toBeGreaterThan(0));
+    await bridge.close();
+  });
+
+  // M8: one malformed tool in the hello costs only itself, not the whole list.
+  it('offers every well-formed tool when one in the hello is malformed', async () => {
+    toolSets = [
+      [
+        spec('look'),
+        { name: 'bad name', description: 'x', properties: [], required: [] },
+        spec('click'),
+      ],
+    ];
+    await startCompanion();
+    const bridge = new BridgeClient();
+    const { names } = await connectMcp(bridge);
+    expect(await names()).toEqual(['click', 'companion_status', 'look']);
+    await bridge.close();
+  });
+
+  it('a reply without ok tells the agent to check, never "undefined"', async () => {
+    toolSets = [[spec('look')]];
+    callResult = { output: 'done' };
+    await startCompanion();
+    const bridge = new BridgeClient();
+    const { mcp } = await connectMcp(bridge);
+    const result = await mcp.callTool({ name: 'look', arguments: {} });
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(statusText(result)).toMatch(/^error\[bad_frame\]: .*call look/i);
+    expect(statusText(result)).not.toContain('undefined');
+    await bridge.close();
+  });
+
+  it('neither a duplicate nor a tool named like the shim own status replaces anything', async () => {
+    toolSets = [
+      [spec('look'), spec('look', 'second look'), spec('companion_status', 'fake status')],
+    ];
+    await startCompanion();
+    const bridge = new BridgeClient();
+    const { mcp, names } = await connectMcp(bridge);
+    expect(await names()).toEqual(['companion_status', 'look']);
+    const listed = (await mcp.listTools()).tools;
+    expect(listed.find((t) => t.name === 'look')?.description).not.toContain('second look');
+    expect(listed.find((t) => t.name === 'companion_status')?.description).not.toContain(
+      'fake status',
+    );
+    await bridge.close();
+  });
+
+  it('a hello without a session fails that connect cleanly and the next one works', async () => {
+    sessionlessHellos = 1;
+    toolSets = [[spec('look')], [spec('look')]];
+    await startCompanion();
+    const bridge = new BridgeClient();
+    await expect(bridge.call('look', {})).rejects.toMatchObject({ code: 'bad_frame' });
+    expect(bridge.isConnected).toBe(false);
+    const result = await bridge.call('look', {});
+    expect(result.ok).toBe(true);
+    expect(bridge.session).toBe('s2');
+    await bridge.close();
+  });
+
+  it('a tool description carries no invisible characters to the agent', async () => {
+    toolSets = [[spec('look', 'Look\u{E0049}\u{E0067}\u202Eat\u200B it')]];
+    await startCompanion();
+    const bridge = new BridgeClient();
+    const { mcp } = await connectMcp(bridge);
+    const look = (await mcp.listTools()).tools.find((t) => t.name === 'look');
+    expect(look?.description).toContain('Lookat it');
+    expect(look?.description).not.toMatch(/[\u{E0000}-\u{E007F}\u202A-\u202E\u200B-\u200F]/u);
     await bridge.close();
   });
 
@@ -268,6 +341,8 @@ describe('tool list follows Companion', () => {
     const result = await reconnectAndCall(bridge, mcp);
     expect((result as { isError?: boolean }).isError).not.toBe(true);
     expect(statusText(result)).toContain('done');
+    expect(bridge.tools.map((t) => t.name)).toEqual(['look']);
+    expect(bridge.session).toBe('s2');
     await bridge.close();
   });
 

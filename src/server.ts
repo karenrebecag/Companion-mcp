@@ -27,6 +27,8 @@ function buildDescription(spec: ToolSpec, isWriteTool: boolean): string {
   // Strip control characters (S3).
   // eslint-disable-next-line no-control-regex
   desc = desc.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+  // Tag, bidi and zero-width characters would hide text from a person reading the same list.
+  desc = stripInvisible(desc);
 
   // Collapse runs of multiple newlines to at most two (S3).
   desc = desc.replace(/\n\n\n+/g, '\n\n');
