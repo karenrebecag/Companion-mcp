@@ -12,6 +12,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeClient, type ToolSpec } from './bridge/client.js';
 import { createServer as createMcpServer, attachBridge } from './server.js';
+import { READ_TOOLS, WRITE_TOOLS } from './bridge/tool-kinds.js';
 
 function spec(name: string, description = `${name} tool`): ToolSpec {
   return { name, description, properties: [], required: [] };
@@ -217,5 +218,28 @@ describe('tool list follows Companion', () => {
     expect((result as { isError?: boolean }).isError).not.toBe(true);
     expect(statusText(result)).toContain('done');
     await bridge.close();
+  });
+
+  // M5: every read Companion budgets as a read is offered as read-only, so the client does not ask
+  // for permission on each browser_read or companion_log, and only actions carry the warning.
+  it('marks every read and action the way Companion buckets them', async () => {
+    const names = [...READ_TOOLS, ...WRITE_TOOLS, 'some_future_tool'];
+    toolSets = [names.map((n) => spec(n))];
+    await startCompanion();
+    const bridge = new BridgeClient();
+    const { mcp } = await connectMcp(bridge);
+    const tools = (await mcp.listTools()).tools;
+    for (const tool of tools) {
+      if (tool.name === 'companion_status') continue;
+      const reads = READ_TOOLS.has(tool.name);
+      expect(tool.annotations?.readOnlyHint, tool.name).toBe(reads);
+      expect(/may still have happened/.test(tool.description ?? ''), tool.name).toBe(!reads);
+    }
+    expect(tools).toHaveLength(names.length + 1);
+    await bridge.close();
+  });
+
+  it('never lists a tool as both a read and an action', () => {
+    expect([...READ_TOOLS].filter((n) => WRITE_TOOLS.has(n))).toEqual([]);
   });
 });
