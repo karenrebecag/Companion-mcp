@@ -338,4 +338,187 @@ describe('BridgeClient lifecycle', () => {
     expect(sockets).toHaveLength(2);
     await client.close();
   });
+
+  // H3: after a denied or expired sheet Companion answers session_closed until the idle close.
+  // A new hello asks again; the rejected call never ran, so sending it once more is safe.
+  it.each(['session_closed', 'no_session'])(
+    'asks Companion again once after %s and returns the retried result',
+    async (code) => {
+      const calls: number[] = [];
+      await start(
+        helloThen((msg, socket, connection) => {
+          calls.push(connection);
+          if (connection === 1) {
+            socket.write(JSON.stringify({ id: msg.id, error: { code, message: 'closed' } }) + '\n');
+          } else reply(socket, msg.id, { ok: true, output: 'again', target: '' });
+        }),
+      );
+      const client = new BridgeClient();
+      await expect(client.call('look', {})).resolves.toMatchObject({ output: 'again' });
+      expect(calls).toEqual([1, 2]);
+      await client.close();
+    },
+  );
+
+  it('asks only once: a second session_closed reaches the agent', async () => {
+    let callCount = 0;
+    await start(
+      helloThen((msg, socket) => {
+        callCount += 1;
+        socket.write(
+          JSON.stringify({ id: msg.id, error: { code: 'session_closed', message: 'closed' } }) +
+            '\n',
+        );
+      }),
+    );
+    const client = new BridgeClient();
+    await expect(client.call('look', {})).rejects.toMatchObject({ code: 'session_closed' });
+    expect(callCount).toBe(2);
+    await client.close();
+  });
+
+  it('does not retry a call the user denied', async () => {
+    let callCount = 0;
+    await start(
+      helloThen((msg, socket) => {
+        callCount += 1;
+        socket.write(
+          JSON.stringify({ id: msg.id, error: { code: 'denied_by_user', message: 'no' } }) + '\n',
+        );
+      }),
+    );
+    const client = new BridgeClient();
+    await expect(client.call('click', { id: 1 })).rejects.toMatchObject({ code: 'denied_by_user' });
+    expect(callCount).toBe(1);
+    await client.close();
+  });
+
+  // A call already running when another gets session_closed may have acted: resending it would
+  // run a click or a type_text twice.
+  it('never resends a call that was in flight when another got session_closed', async () => {
+    const frames: Array<{ connection: number; name?: string }> = [];
+    await start(
+      helloThen((msg, socket, connection) => {
+        frames.push({ connection, name: msg.params?.name });
+        if (connection === 1 && msg.params?.name === 'click') return;
+        if (connection === 1) {
+          socket.write(
+            JSON.stringify({ id: msg.id, error: { code: 'session_closed', message: 'x' } }) + '\n',
+          );
+        } else reply(socket, msg.id, { ok: true, output: 'again', target: '' });
+      }),
+    );
+    const client = new BridgeClient();
+    await client.connect();
+    // Observed from the start: it rejects while the other call is still being retried.
+    const running = client.call('click', { id: 7 }).catch((e: unknown) => e);
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    const rejected = client.call('look', {});
+    await expect(rejected).resolves.toMatchObject({ output: 'again' });
+    expect(await running).toMatchObject({ code: 'companion_unavailable' });
+    expect(frames.filter((f) => f.name === 'click')).toHaveLength(1);
+    await client.close();
+  });
+
+  it('resends the same arguments under a new id', async () => {
+    const seen: Array<{ id: number; args: unknown }> = [];
+    await start(
+      helloThen((msg, socket, connection) => {
+        seen.push({ id: msg.id, args: msg.params?.arguments });
+        if (connection === 1) {
+          socket.write(
+            JSON.stringify({ id: msg.id, error: { code: 'session_closed', message: 'x' } }) + '\n',
+          );
+        } else reply(socket, msg.id, { ok: true, output: 'typed', target: '' });
+      }),
+    );
+    const client = new BridgeClient();
+    await client.call('type_text', { text: 'hola' });
+    expect(seen.map((s) => s.args)).toEqual([{ text: 'hola' }, { text: 'hola' }]);
+    expect(seen[0].id).not.toBe(seen[1].id);
+    await client.close();
+  });
+
+  it('reports why the second try failed when Companion is gone by then', async () => {
+    await start(
+      helloThen((msg, socket) => {
+        socket.write(
+          JSON.stringify({ id: msg.id, error: { code: 'session_closed', message: 'x' } }) + '\n',
+        );
+        server.close();
+      }),
+    );
+    const client = new BridgeClient();
+    await expect(client.call('look', {})).rejects.toMatchObject({ code: 'companion_unavailable' });
+  });
+
+  // Right after the user said no, a new sheet on the agent's next call would nag; it waits.
+  it('does not ask again right after the user denied', async () => {
+    let calls = 0;
+    await start(
+      helloThen((msg, socket) => {
+        calls += 1;
+        const code = calls === 1 ? 'denied_by_user' : 'session_closed';
+        socket.write(JSON.stringify({ id: msg.id, error: { code, message: 'x' } }) + '\n');
+      }),
+    );
+    const client = new BridgeClient();
+    await expect(client.call('click', { id: 1 })).rejects.toMatchObject({ code: 'denied_by_user' });
+    await expect(client.call('click', { id: 1 })).rejects.toMatchObject({
+      code: 'session_closed',
+      message: expect.stringMatching(/said no.*ask the user/i),
+    });
+    expect(sockets).toHaveLength(1);
+    await client.close();
+  });
+
+  it('asks again once the pause after a denial has passed', async () => {
+    let calls = 0;
+    await start(
+      helloThen((msg, socket, connection) => {
+        calls += 1;
+        if (connection === 2) return reply(socket, msg.id, { ok: true, output: 'ok', target: '' });
+        const code = calls === 1 ? 'denied_by_user' : 'session_closed';
+        socket.write(JSON.stringify({ id: msg.id, error: { code, message: 'x' } }) + '\n');
+      }),
+    );
+    const client = new BridgeClient({ reaskAfterDenialMs: 30 });
+    await expect(client.call('click', { id: 1 })).rejects.toMatchObject({ code: 'denied_by_user' });
+    await new Promise((r) => setTimeout(r, 60));
+    await expect(client.call('click', { id: 1 })).resolves.toMatchObject({ output: 'ok' });
+    await client.close();
+  });
+
+  it('starts the pause when the user denies the sheet the retry opened', async () => {
+    let deniedOnce = false;
+    await start(
+      helloThen((msg, socket, connection) => {
+        // The retry's sheet is the only one denied; after that the session stays closed.
+        const code = connection === 2 && !deniedOnce ? 'denied_by_user' : 'session_closed';
+        if (code === 'denied_by_user') deniedOnce = true;
+        socket.write(JSON.stringify({ id: msg.id, error: { code, message: 'x' } }) + '\n');
+      }),
+    );
+    const client = new BridgeClient();
+    await expect(client.call('look', {})).rejects.toMatchObject({ code: 'denied_by_user' });
+    await expect(client.call('look', {})).rejects.toMatchObject({ code: 'session_closed' });
+    expect(sockets).toHaveLength(2);
+    await client.close();
+  });
+
+  it('does not ask again right after Companion cooled down', async () => {
+    let calls = 0;
+    await start(
+      helloThen((msg, socket) => {
+        calls += 1;
+        const code = calls === 1 ? 'cooling_down' : 'session_closed';
+        socket.write(JSON.stringify({ id: msg.id, error: { code, message: 'x' } }) + '\n');
+      }),
+    );
+    const client = new BridgeClient();
+    await expect(client.call('look', {})).rejects.toMatchObject({ code: 'cooling_down' });
+    await expect(client.call('look', {})).rejects.toMatchObject({ code: 'session_closed' });
+    expect(sockets).toHaveLength(1);
+    await client.close();
+  });
 });
