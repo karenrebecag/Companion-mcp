@@ -1,0 +1,5 @@
+scripts:
+  setup: |
+    pnpm install --frozen-lockfile
+# The agent runs vitest and tsc right away; without node_modules its first turn fails.
+setupAgentStartupPolicy: wait-for-setup
