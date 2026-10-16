@@ -554,6 +554,37 @@ describe('BridgeClient lifecycle', () => {
     }
   });
 
+  // companion_wait_turn parks inside Companion for up to 100 s: the 30 s read timeout would cut it
+  // short, yet it is not an action, so a timeout says `timeout`, not `approval_timeout`.
+  it('gives companion_wait_turn the long wait and times it out as a read', async () => {
+    await start(
+      helloThen((msg, socket) => {
+        if (msg.params?.name === 'look') {
+          return reply(socket, msg.id, { ok: true, output: '', target: '' });
+        }
+        if ((msg.params?.arguments as { late?: boolean } | undefined)?.late) return;
+        setTimeout(() => reply(socket, msg.id, { ok: true, output: 'done', target: '' }), 90);
+      }),
+    );
+    const client = new BridgeClient({ readTimeoutMs: 30, writeTimeoutMs: 200, sessionSheetMs: 0 });
+    try {
+      await client.call('look', {});
+      await expect(client.call('companion_wait_turn', {})).resolves.toMatchObject({
+        output: 'done',
+      });
+      const quick = new BridgeClient({ readTimeoutMs: 10, writeTimeoutMs: 30, sessionSheetMs: 0 });
+      try {
+        await expect(quick.call('companion_wait_turn', { late: true })).rejects.toMatchObject({
+          code: 'timeout',
+        });
+      } finally {
+        await quick.close();
+      }
+    } finally {
+      await client.close();
+    }
+  });
+
   // The first call of a connection raises the session sheet before anything runs, read or not.
   it.each(['look', 'browser_click'])(
     'gives %s, as the first call after hello, the time of the session sheet',
