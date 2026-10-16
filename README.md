@@ -38,13 +38,16 @@ Before using, enable the bridge in Companion:
 3. Navigate to **Agentes** (Agents)
 4. Enable the toggle **"Prestar las manos a otros agentes"** (Allow other agents to control my hands)
 
-When Claude Code tries to use a tool, an approval sheet will appear in Companion. You can:
+When Claude Code tries to use a tool, a sheet appears in Companion asking to use the Mac for this connection. The sheet for the connection is never remembered: each new connection asks again. Sensitive actions (destructive clicks, typing in command shells, opening URLs) ask on their own sheet each time.
 
-- **Permitir 1 h**: Allow Claude Code to act for 1 hour without additional approvals
-- **Solo esta conexión**: Allow this single action only
-- **No**: Deny
+## QA mode
 
-The approval sheet is the same one Companion uses for voice commands, and sensitive actions (destructive clicks, typing in command shells, opening URLs) always require approval.
+Companion has a second, volatile switch under Ajustes > Privacidad, below "Prestar las manos": **Modo QA**. It starts off, lives in memory (it dies when Companion closes) and needs Touch ID or the system password to be available. With it on, Claude Code gets `companion_ask` and `companion_wait_turn` (type a turn into the conversation, then wait for it to end) and the actions it takes skip the per-action sheet: what is not critical acts directly, and anything critical (terminal, shell, deleting, overwriting) asks the user for Touch ID at that moment.
+
+The risk, in one sentence: while it is on and the session sheet is approved, any process of the same user that can read `bridge.token` can talk to Companion as if it were you and read its replies and tool output, with no sheet; only critical actions still need your finger.
+
+- `companion_ask { text, conversation?, as_user_words?, wait_seconds? }` starts a turn and waits up to `wait_seconds` (max 100). A status of `awaiting_owner` means a Touch ID dialog is on screen: tell the user to touch the sensor, then call `companion_wait_turn { turn_id }`.
+- `companion_wait_turn` is read-only and may block up to 130 s; the shim gives it that time instead of the 30 s read limit.
 
 ## Environment Override
 
@@ -91,7 +94,7 @@ Results show what's on screen as text: the tool descriptions declare this as dat
 
 - **Companion is not reachable**: Make sure Companion is running and the "Prestar las manos" setting is enabled. Run the `companion_status` tool to check.
 - **Busy**: Another Claude Code session is already using the bridge. Disconnect it or wait a moment.
-- **Request timed out**: Write actions can take up to 2 minutes if waiting for user approval. Read actions timeout after 30 seconds.
+- **Request timed out**: Write actions can take up to 2 minutes if waiting for user approval. Read actions timeout after 30 seconds, except `companion_wait_turn`, which waits up to 130 seconds.
 - **Element ID has expired** (`stale_id`): Call `look` again to refresh element IDs.
 
 ## Testing

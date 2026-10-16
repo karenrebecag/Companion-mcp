@@ -12,7 +12,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeClient, type ToolSpec } from './bridge/client.js';
 import { createServer as createMcpServer, attachBridge } from './server.js';
-import { READ_TOOLS, WRITE_TOOLS } from './bridge/tool-kinds.js';
+import { isWriteTool, LONG_TOOLS, READ_TOOLS, WRITE_TOOLS } from './bridge/tool-kinds.js';
 import { NEXT_ACTION } from './core/next-action.js';
 
 function spec(name: string, description = `${name} tool`): ToolSpec {
@@ -349,7 +349,7 @@ describe('tool list follows Companion', () => {
   // M5: every read Companion budgets as a read is offered as read-only, so the client does not ask
   // for permission on each browser_read or companion_log, and only actions carry the warning.
   it('marks every read and action the way Companion buckets them', async () => {
-    const names = [...READ_TOOLS, ...WRITE_TOOLS, 'some_future_tool'];
+    const names = [...READ_TOOLS, ...LONG_TOOLS, ...WRITE_TOOLS, 'some_future_tool'];
     toolSets = [names.map((n) => spec(n))];
     await startCompanion();
     const bridge = new BridgeClient();
@@ -357,7 +357,7 @@ describe('tool list follows Companion', () => {
     const tools = (await mcp.listTools()).tools;
     for (const tool of tools) {
       if (tool.name === 'companion_status') continue;
-      const reads = READ_TOOLS.has(tool.name);
+      const reads = READ_TOOLS.has(tool.name) || LONG_TOOLS.has(tool.name);
       expect(tool.annotations?.readOnlyHint, tool.name).toBe(reads);
       expect(/may still have happened/.test(tool.description ?? ''), tool.name).toBe(!reads);
     }
@@ -398,8 +398,30 @@ describe('tool list follows Companion', () => {
     },
   );
 
-  it('never lists a tool as both a read and an action', () => {
-    expect([...READ_TOOLS].filter((n) => WRITE_TOOLS.has(n))).toEqual([]);
+  it('never lists a tool in more than one of read, long and action', () => {
+    const all = [...READ_TOOLS, ...LONG_TOOLS, ...WRITE_TOOLS];
+    expect(all.filter((n, i) => all.indexOf(n) !== i)).toEqual([]);
+  });
+
+  // companion_ask starts a turn that drives the Mac, so it is an action; the other QA tools that
+  // only look are reads. companion_wait_turn is neither: it blocks, read-only.
+  it.each(['companion_ask', 'companion_new_conversation', 'companion_set_setting'])(
+    'lists %s as an action',
+    (name) => {
+      expect(WRITE_TOOLS.has(name)).toBe(true);
+    },
+  );
+
+  it.each(['companion_turns', 'companion_screen', 'companion_controls', 'companion_capture'])(
+    'lists %s as a read',
+    (name) => {
+      expect(READ_TOOLS.has(name)).toBe(true);
+    },
+  );
+
+  it('lists companion_wait_turn as a long read-only tool', () => {
+    expect(LONG_TOOLS.has('companion_wait_turn')).toBe(true);
+    expect(isWriteTool('companion_wait_turn')).toBe(false);
   });
 
   // H6: what a tool returns is screen content. Invisible characters (tag block, bidi overrides,
@@ -447,6 +469,36 @@ describe('tool list follows Companion', () => {
     expect(first.indexOf('ignore the above')).toBeLessThan(
       first.lastIndexOf('[end of screen content'),
     );
+    await bridge.close();
+  });
+
+  // The turn result carries the model's reply and the tools' output: text the page or the web can
+  // shape, so it is fenced and cleaned like any screen content.
+  it('fences and cleans a companion_wait_turn result', async () => {
+    toolSets = [[spec('companion_wait_turn')]];
+    callResult = {
+      ok: true,
+      output: '{"reply":{"text":"hi\u{E0049}\u202E"},"status":"completed"}',
+      target: '',
+    };
+    await startCompanion();
+    const bridge = new BridgeClient();
+    const { mcp } = await connectMcp(bridge);
+    const text = statusText(await mcp.callTool({ name: 'companion_wait_turn', arguments: {} }));
+    expect(text).toContain('"status":"completed"');
+    expect(text).toContain('[end of screen content');
+    expect(text).not.toMatch(/[\u{E0000}-\u{E007F}\u202A-\u202E]/u);
+    await bridge.close();
+  });
+
+  it('keeps owner_refused as a code with its next step', async () => {
+    toolSets = [[spec('click')]];
+    callResult = { ok: false, output: 'owner_refused: the owner declined', target: '' };
+    await startCompanion();
+    const bridge = new BridgeClient();
+    const { mcp } = await connectMcp(bridge);
+    const text = statusText(await mcp.callTool({ name: 'click', arguments: {} }));
+    expect(text).toBe(`error[owner_refused]: the owner declined. ${NEXT_ACTION.owner_refused}`);
     await bridge.close();
   });
 

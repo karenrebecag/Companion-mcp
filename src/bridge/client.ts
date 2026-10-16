@@ -10,7 +10,7 @@ import { readFileSync } from 'fs';
 import { getSocketPath, getTokenPath } from './paths.js';
 import { stripInvisible } from '../core/screen-text.js';
 import { BridgeError } from './errors.js';
-import { isWriteTool } from './tool-kinds.js';
+import { isWriteTool, LONG_TOOLS } from './tool-kinds.js';
 import { parseHello, parseCallResult } from './hello.js';
 
 export { BridgeError };
@@ -148,10 +148,12 @@ interface BridgeClientOptions {
 
 function getTimeoutForTool(name: string, options: BridgeClientOptions): TimeoutConfig {
   const isWrite = isWriteTool(name);
+  const isLong = LONG_TOOLS.has(name);
   return {
-    ms: isWrite
-      ? (options.writeTimeoutMs ?? DEFAULT_WRITE_TIMEOUT_MS)
-      : (options.readTimeoutMs ?? DEFAULT_READ_TIMEOUT_MS),
+    ms:
+      isWrite || isLong
+        ? (options.writeTimeoutMs ?? DEFAULT_WRITE_TIMEOUT_MS)
+        : (options.readTimeoutMs ?? DEFAULT_READ_TIMEOUT_MS),
     code: isWrite ? 'approval_timeout' : 'timeout',
   };
 }

@@ -31,6 +31,15 @@ export const NEXT_ACTION: Readonly<Record<string, string>> = {
   timeout: 'If it was an action, call look to check whether it happened before retrying.',
   not_connected: 'Ask the user to open the browser with the Companion extension on, then retry.',
   invalid_args: 'Fix the arguments the message names, then retry.',
+  qa_scope_off:
+    'Ask the user to turn on QA mode in Companion Settings > Privacy, then call hello again.',
+  busy_turn:
+    'A turn is already running: call companion_wait_turn with the turn_id the message names.',
+  interrupted: 'The user took over Companion mid-turn: ask them before asking again.',
+  owner_refused: 'The user declined the Touch ID prompt: ask them before trying this again.',
+  owner_unavailable:
+    'Touch ID and the password are unavailable, so QA mode turned itself off: ask the user to turn it on again.',
+  owner_busy: 'Another Touch ID prompt is open: ask the user to answer it, then retry.',
 };
 
 // Per code, the wording that means the message already gave this step, so ours would say it twice.
